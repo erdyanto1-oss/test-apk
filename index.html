@@ -1,134 +1,100 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { initializeApp } from 'firebase/app';
 import { 
-  getAuth, 
-  signInAnonymously, 
-  signInWithCustomToken,
-  onAuthStateChanged 
-} from 'firebase/auth';
-import { 
-  getFirestore, 
-  collection, 
-  doc, 
-  setDoc, 
-  updateDoc, 
-  addDoc,
-  onSnapshot, 
-  serverTimestamp,
-  increment
-} from 'firebase/firestore';
-import { 
-  Scan, 
-  Package, 
-  Plus, 
-  Minus, 
-  Save, 
-  History, 
-  Search, 
-  ArrowLeft, 
-  X,
-  Camera,
-  PlusCircle, 
-  PenTool,
-  Clock,
-  ArrowUpRight,
-  ArrowDownLeft,
-  Settings,
-  CheckCircle,
-  Store,
-  Calendar,
-  Filter,
-  Smartphone,
-  Wifi
+  Scan, Package, Plus, Minus, Save, History, Search, ArrowLeft, X,
+  Camera, PlusCircle, PenTool, Clock, ArrowUpRight, ArrowDownLeft,
+  Settings, CheckCircle, Store, Calendar, Filter, Smartphone, Wifi,
+  RefreshCw, AlertCircle, Loader2, Database
 } from 'lucide-react';
 
-/* KONFIGURASI FIREBASE & INISIALISASI */
-const firebaseConfig = JSON.parse(__firebase_config);
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'stock-app-default';
+/* KONFIGURASI UTAMA 
+   Pastikan Script Google Sheet Anda dideploy sebagai:
+   - Execute as: Me
+   - Who has access: Anyone (PENTING!)
+*/
+const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxQrGCb1G-MDSTtlal365bRQRnxDoXMcXlgmkO7dc-_PyMnHy-y6qeRywsbTsmazgUm/exec";
+const STORE_CODE = "GRADE C";
 
-// --- KONFIGURASI PERMANEN ---
-const PERMANENT_STORE_CODE = "GRADE C";
-const PERMANENT_SHEET_URL = "https://script.google.com/macros/s/AKfycbxQrGCb1G-MDSTtlal365bRQRnxDoXMcXlgmkO7dc-_PyMnHy-y6qeRywsbTsmazgUm/exec";
+// --- DATA DEMO (FALLBACK) ---
+// Digunakan jika koneksi ke Google Sheet gagal (misal karena masalah CORS/Permissions)
+const DEMO_INVENTORY = {
+  "8992761136014": { id: "8992761136014", name: "Indomie Goreng", stock: 50, updatedAt: new Date().toISOString() },
+  "BRG-001": { id: "BRG-001", name: "Kopi Sachet", stock: 10, updatedAt: new Date().toISOString() },
+  "BRG-002": { id: "BRG-002", name: "Air Mineral 600ml", stock: 24, updatedAt: new Date().toISOString() }
+};
 
-// --- KOMPONEN UTAMA ---
+const DEMO_LOGS = [
+  { timestamp: new Date().toISOString(), productName: "Indomie Goreng", type: "new", amount: 50, id: "log-1" },
+  { timestamp: new Date(Date.now() - 86400000).toISOString(), productName: "Kopi Sachet", type: "out", amount: 2, id: "log-2" }
+];
 
 export default function App() {
-  const [user, setUser] = useState(null);
-  // Store Code dan Sheet URL sekarang permanen (hardcoded)
-  const storeCode = PERMANENT_STORE_CODE;
-  const sheetUrl = PERMANENT_SHEET_URL;
-
-  const [view, setView] = useState('home'); // Langsung masuk home, tidak ada login
+  const [view, setView] = useState('home');
   const [inventory, setInventory] = useState({});
+  const [logs, setLogs] = useState([]);
   const [currentProduct, setCurrentProduct] = useState(null);
   const [scannedCode, setScannedCode] = useState('');
+  
+  // States untuk Loading & Error
   const [loading, setLoading] = useState(true);
+  const [processing, setProcessing] = useState(false);
+  const [errorMsg, setErrorMsg] = useState('');
+  const [isDemoMode, setIsDemoMode] = useState(false);
 
-  // --- AUTHENTICATION & SETUP ---
-  useEffect(() => {
-    const initAuth = async () => {
-      try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
-        }
-      } catch (error) {
-        console.error("Auth Error:", error);
-      }
-    };
-    initAuth();
-
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      // Loading akan dimatikan oleh listener snapshot di bawah
-    });
-    return () => unsubscribe();
-  }, []);
-
-  // --- DATA SYNC (FIRESTORE) ---
-  useEffect(() => {
-    if (!user) return;
-    
+  // --- FETCH DATA FROM GOOGLE SHEET ---
+  const fetchData = async () => {
     setLoading(true);
-    // Path: public/data/GRADE C_inventory
-    const collectionName = `${storeCode}_inventory`;
-    const inventoryRef = collection(db, 'artifacts', appId, 'public', 'data', collectionName);
+    setErrorMsg('');
+    setIsDemoMode(false);
     
-    const unsubscribe = onSnapshot(inventoryRef, (snapshot) => {
-      const items = {};
-      snapshot.forEach((doc) => {
-        items[doc.id] = { id: doc.id, ...doc.data() };
-      });
-      setInventory(items);
-      setLoading(false);
-    }, (error) => {
-      console.error("Error fetching inventory:", error);
-      setLoading(false);
-    });
-
-    return () => unsubscribe();
-  }, [user]);
-
-  // --- GOOGLE SHEET SYNC ---
-  const syncToGoogleSheet = async (payload) => {
-    // Selalu kirim karena URL sudah permanen
     try {
-      await fetch(sheetUrl, {
-        method: 'POST',
-        mode: 'no-cors', 
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...payload, store: storeCode })
+      // Timeout 10 detik agar tidak hang selamanya
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+      const response = await fetch(`${GOOGLE_SCRIPT_URL}?action=read&store=${STORE_CODE}`, {
+        signal: controller.signal
       });
-    } catch (error) { console.error("Sheet Error", error); }
+      
+      clearTimeout(timeoutId);
+
+      if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
+      
+      const data = await response.json();
+      
+      if (data.status === 'error') throw new Error(data.message);
+
+      // Parsing Data Inventory
+      const invMap = {};
+      if (data.inventory) {
+        data.inventory.forEach(item => {
+          invMap[item.id] = item;
+        });
+      }
+
+      setInventory(invMap);
+      setLogs(data.logs || []);
+      setLoading(false);
+
+    } catch (err) {
+      console.warn("Gagal mengambil data Live, menggunakan Data Demo:", err);
+      
+      // FALLBACK KE MODE DEMO
+      setInventory(DEMO_INVENTORY);
+      setLogs(DEMO_LOGS);
+      setIsDemoMode(true);
+      setErrorMsg("Gagal koneksi ke Sheet. Menampilkan Data Demo (Offline Mode).");
+      setLoading(false);
+    }
   };
+
+  // Load data saat pertama kali buka
+  useEffect(() => {
+    fetchData();
+  }, []);
 
   // --- ACTIONS ---
 
-  const handleScanSuccess = async (code) => {
+  const handleScanSuccess = (code) => {
     setScannedCode(code);
     const existingProduct = inventory[code];
     if (existingProduct) {
@@ -140,81 +106,89 @@ export default function App() {
   };
 
   const saveProductTransaction = async (amount, type) => {
-    if (!user || !currentProduct) return;
-
-    const finalId = currentProduct.id.trim() || `NO-ID-${Date.now()}`;
-    const collectionInv = `${storeCode}_inventory`;
-    const collectionLogs = `${storeCode}_logs`;
-
-    const productRef = doc(db, 'artifacts', appId, 'public', 'data', collectionInv, finalId);
-    const logsRef = collection(db, 'artifacts', appId, 'public', 'data', collectionLogs);
+    if (!currentProduct) return;
     
-    const timestamp = serverTimestamp();
-    const numAmount = parseInt(amount);
+    setProcessing(true); // Tampilkan loading overlay
+
+    const finalId = currentProduct.id.trim() || `MANUAL-${Date.now()}`;
     const finalName = currentProduct.name || 'Produk Tanpa Nama';
-    let finalStock = currentProduct.stock || 0;
+    const numAmount = parseInt(amount);
+    
+    // Payload yang akan dikirim ke Google Sheet
+    const payload = {
+      action: 'transaction',
+      store: STORE_CODE,
+      id: finalId,
+      name: finalName,
+      amount: numAmount,
+      type: type, // 'in', 'out', atau 'new'
+      timestamp: new Date().toISOString()
+    };
 
     try {
-      if (currentProduct.isNew) {
-        finalStock = numAmount;
-        await setDoc(productRef, {
-          name: finalName,
-          stock: numAmount,
-          updatedAt: timestamp,
-          barcode: finalId
-        }, { merge: true });
+      // Gunakan mode 'no-cors' agar browser tidak memblokir request POST ke Google Script
+      // Kelemahan: Kita tidak bisa membaca response JSON, tapi request tetap terkirim.
+      await fetch(GOOGLE_SCRIPT_URL, {
+        method: 'POST',
+        mode: 'no-cors', 
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
 
-        await addDoc(logsRef, {
-          productId: finalId,
-          productName: finalName,
-          type: 'new',
-          amount: numAmount,
-          timestamp: timestamp
-        });
-        
-        syncToGoogleSheet({ action: 'add_log', id: finalId, name: finalName, type: 'BARU (+)', amount: numAmount });
-
-      } else {
-        const adjustment = type === 'in' ? numAmount : -numAmount;
-        finalStock = (currentProduct.stock || 0) + adjustment;
-        
-        await updateDoc(productRef, {
-          stock: increment(adjustment),
-          updatedAt: timestamp
-        });
-
-        await addDoc(logsRef, {
-          productId: finalId,
-          productName: finalName || currentProduct.id,
-          type: type,
-          amount: numAmount,
-          timestamp: timestamp
-        });
-
-        syncToGoogleSheet({ 
-          action: 'add_log', id: finalId, name: finalName, 
-          type: type === 'in' ? 'MASUK (+)' : 'KELUAR (-)', amount: numAmount 
-        });
-      }
-
-      syncToGoogleSheet({ action: 'update_inventory', id: finalId, name: finalName, stock: finalStock });
+      // --- OPTIMISTIC UPDATE ---
+      // Update tampilan langsung tanpa menunggu konfirmasi server (agar terasa cepat)
+      const newInventory = { ...inventory };
+      const currentStock = currentProduct.isNew ? 0 : (newInventory[finalId]?.stock || 0);
       
+      let finalStock = currentStock;
+      if (type === 'new') finalStock = numAmount;
+      else if (type === 'in') finalStock += numAmount;
+      else if (type === 'out') finalStock -= numAmount;
+
+      newInventory[finalId] = {
+        id: finalId,
+        name: finalName,
+        stock: finalStock,
+        updatedAt: new Date().toISOString()
+      };
+
+      setInventory(newInventory);
+      
+      // Tambah log lokal sementara
+      const newLog = {
+        id: `local-${Date.now()}`,
+        productId: finalId,
+        productName: finalName,
+        type: type,
+        amount: numAmount,
+        timestamp: new Date().toISOString() 
+      };
+      setLogs(prevLogs => [newLog, ...prevLogs]);
+
+      setProcessing(false);
       setView('home');
       setScannedCode('');
       setCurrentProduct(null);
+      
+      // Jika dalam demo mode, tampilkan notifikasi bahwa data "disimpan" (simulasi)
+      if (isDemoMode) {
+        alert("Mode Demo: Data diperbarui di tampilan lokal saja.");
+      }
+
     } catch (error) {
-      console.error("Gagal menyimpan:", error);
-      alert("Gagal menyimpan data.");
+      console.error("Save Error:", error);
+      alert("Gagal mengirim data. Cek koneksi internet.");
+      setProcessing(false);
     }
   };
 
   // --- RENDERERS ---
 
-  if (loading) {
+  if (loading && !inventory) {
     return (
       <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center text-slate-500 font-sans">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mb-4"></div>
-        <p>Memuat Toko {storeCode}...</p>
+        <Loader2 className="animate-spin h-10 w-10 text-blue-600 mb-4" />
+        <p>Menghubungkan ke Google Sheet...</p>
       </div>
     );
   }
@@ -222,23 +196,25 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-100 font-sans text-slate-800 max-w-md mx-auto shadow-2xl overflow-hidden relative flex flex-col">
       
-      {/* HEADER BARU: Dengan Indikator Online */}
-      <header className="bg-blue-600 text-white p-4 shadow-md sticky top-0 z-20">
+      {/* HEADER */}
+      <header className={`${isDemoMode ? 'bg-orange-600' : 'bg-blue-600'} text-white p-4 shadow-md sticky top-0 z-20 transition-colors`}>
         <div className="flex justify-between items-center">
           <div className="flex flex-col">
             <h1 className="text-lg font-bold flex items-center gap-2">
               <Package size={20} /> Stok Pintar
             </h1>
-            <span className="text-[10px] opacity-90 font-mono flex items-center gap-1 bg-blue-700 px-2 py-0.5 rounded-full w-fit mt-1 border border-blue-500">
-              <Store size={10} /> {storeCode}
+            <span className="text-[10px] opacity-90 font-mono flex items-center gap-1 bg-black/20 px-2 py-0.5 rounded-full w-fit mt-1 border border-white/20">
+              <Store size={10} /> {STORE_CODE} {isDemoMode ? '(OFFLINE)' : '(G-Sheet)'}
             </span>
           </div>
           <div className="flex items-center gap-3">
-            {/* Indikator Online di Header */}
-            <div className="flex items-center gap-1 text-[10px] font-bold bg-green-500 px-2 py-1 rounded text-white shadow-sm animate-in fade-in">
-                <Wifi size={10} /> ONLINE
-            </div>
-
+            <button 
+              onClick={fetchData} 
+              disabled={loading}
+              className={`p-2 rounded-full hover:bg-white/20 transition-colors ${loading ? 'animate-spin' : ''}`}
+            >
+              <RefreshCw size={18} />
+            </button>
             {view === 'home' && (
                <button onClick={() => setView('settings')} className="text-blue-100 hover:text-white p-1">
                  <Settings size={22} />
@@ -252,6 +228,25 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      {/* PROCESSING OVERLAY */}
+      {processing && (
+        <div className="absolute inset-0 z-50 bg-black/50 backdrop-blur-sm flex flex-col items-center justify-center text-white">
+          <Loader2 className="animate-spin h-12 w-12 mb-2" />
+          <p className="font-bold">Menyimpan...</p>
+        </div>
+      )}
+
+      {/* ERROR / DEMO BANNER */}
+      {errorMsg && (
+        <div className="bg-orange-50 text-orange-700 px-4 py-3 text-xs flex items-start gap-2 border-b border-orange-100">
+          <AlertCircle size={16} className="shrink-0 mt-0.5" />
+          <div>
+            <p className="font-bold mb-1">Mode Demo Aktif</p>
+            <p>Gagal terhubung ke Sheet. Menampilkan data contoh. Pastikan Script Google Sheet sudah di-deploy sebagai <b>"Anyone"</b>.</p>
+          </div>
+        </div>
+      )}
 
       {/* MAIN CONTENT */}
       <main className="flex-1 overflow-y-auto p-4 pb-24 bg-slate-50 scroll-smooth">
@@ -275,21 +270,22 @@ export default function App() {
                setCurrentProduct({ id: tempId, name: '', stock: 0, isNew: true, isManualInput: true });
                setView('product');
             }}
+            loading={loading}
+            isDemoMode={isDemoMode}
           />
         )}
 
         {view === 'settings' && (
           <SettingsView 
             onCancel={() => setView('home')}
-            storeCode={storeCode}
+            storeCode={STORE_CODE}
           />
         )}
 
         {view === 'history' && (
           <HistoryView 
-            storeCode={storeCode} 
-            appId={appId} 
-            db={db} 
+            logs={logs}
+            loading={loading}
           />
         )}
 
@@ -357,70 +353,48 @@ export default function App() {
 
 // --- VIEW COMPONENTS ---
 
-function HistoryView({ storeCode, appId, db }) {
-  const [logs, setLogs] = useState([]);
-  const [loading, setLoading] = useState(true);
+function HistoryView({ logs, loading }) {
+  const [filterType, setFilterType] = useState('today');
   
-  // Filter States
-  const [filterType, setFilterType] = useState('today'); // today, week, custom, all
-  const [startDate, setStartDate] = useState('');
-  const [endDate, setEndDate] = useState('');
-
-  useEffect(() => {
-    if (!storeCode) return;
+  // Logic filtering sederhana
+  const filteredLogs = useMemo(() => {
+    if (!logs || !logs.length) return [];
     
-    // Fetch logs collection
-    const collectionLogs = `${storeCode}_logs`;
-    const logsRef = collection(db, 'artifacts', appId, 'public', 'data', collectionLogs);
-    
-    const unsubscribe = onSnapshot(logsRef, (snapshot) => {
-      const data = [];
-      snapshot.forEach(doc => {
-        data.push({ id: doc.id, ...doc.data() });
-      });
-      // Sort descending
-      data.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
-      setLogs(data);
-      setLoading(false);
-    }, (err) => {
-      console.error("Error fetching logs", err);
-      setLoading(false);
+    // Konversi logs dari format firestore/sheet ke format JS Date standard
+    const parsedLogs = logs.map(log => {
+        let dateObj;
+        try {
+            if (typeof log.timestamp === 'string') dateObj = new Date(log.timestamp);
+            else if (log.timestamp?.seconds) dateObj = new Date(log.timestamp.seconds * 1000);
+            else dateObj = new Date();
+        } catch (e) { dateObj = new Date(); }
+        return { ...log, dateObj };
     });
 
-    return () => unsubscribe();
-  }, [storeCode]);
+    // Sort descending
+    parsedLogs.sort((a, b) => b.dateObj - a.dateObj);
 
-  // Filtering Logic
-  const filteredLogs = useMemo(() => {
-    if (!logs.length) return [];
-    
     const now = new Date();
     const startOfDay = new Date(now.setHours(0,0,0,0));
-    
-    return logs.filter(log => {
-      if (!log.timestamp) return false;
-      const logDate = new Date(log.timestamp.seconds * 1000);
-      const logDay = new Date(logDate).setHours(0,0,0,0);
 
-      if (filterType === 'today') {
-        return logDay === startOfDay.getTime();
-      }
+    return parsedLogs.filter(log => {
+      const logDay = new Date(log.dateObj).setHours(0,0,0,0);
+      if (filterType === 'today') return logDay === startOfDay.getTime();
       if (filterType === 'week') {
-        const sevenDaysAgo = new Date(now);
-        sevenDaysAgo.setDate(now.getDate() - 7);
-        return logDate >= sevenDaysAgo;
+         const sevenDaysAgo = new Date();
+         sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+         return log.dateObj >= sevenDaysAgo;
       }
-      if (filterType === 'custom') {
-        if (!startDate || !endDate) return true; // Show all if incomplete
-        const start = new Date(startDate).setHours(0,0,0,0);
-        const end = new Date(endDate).setHours(23,59,59,999);
-        return logDay >= start && logDay <= end;
-      }
-      return true; // All
+      return true;
     });
-  }, [logs, filterType, startDate, endDate]);
+  }, [logs, filterType]);
 
-  if (loading) return <div className="p-8 text-center text-slate-400">Memuat riwayat...</div>;
+  if (loading) return (
+      <div className="flex flex-col items-center py-10 text-slate-400">
+          <Loader2 className="animate-spin mb-2" />
+          <p>Memuat riwayat...</p>
+      </div>
+  );
 
   return (
     <div className="space-y-4 animate-in fade-in duration-300 pb-20">
@@ -433,69 +407,27 @@ function HistoryView({ storeCode, appId, db }) {
         </div>
       </div>
 
-      {/* FILTER BUTTONS */}
-      <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">
-        <button 
-          onClick={() => setFilterType('today')}
-          className={`px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap transition-colors ${filterType === 'today' ? 'bg-blue-600 text-white shadow-md' : 'bg-white text-slate-500 border border-slate-200'}`}
-        >
-          Hari Ini
-        </button>
-        <button 
-          onClick={() => setFilterType('week')}
-          className={`px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap transition-colors ${filterType === 'week' ? 'bg-blue-600 text-white shadow-md' : 'bg-white text-slate-500 border border-slate-200'}`}
-        >
-          7 Hari
-        </button>
-        <button 
-          onClick={() => setFilterType('custom')}
-          className={`px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap transition-colors ${filterType === 'custom' ? 'bg-blue-600 text-white shadow-md' : 'bg-white text-slate-500 border border-slate-200'}`}
-        >
-          Pilih Tanggal
-        </button>
-         <button 
-          onClick={() => setFilterType('all')}
-          className={`px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap transition-colors ${filterType === 'all' ? 'bg-blue-600 text-white shadow-md' : 'bg-white text-slate-500 border border-slate-200'}`}
-        >
-          Semua
-        </button>
+      <div className="flex gap-2 pb-2">
+        {['today', 'week', 'all'].map(type => (
+            <button 
+                key={type}
+                onClick={() => setFilterType(type)}
+                className={`px-4 py-1.5 rounded-full text-xs font-bold capitalize transition-colors ${filterType === type ? 'bg-blue-600 text-white shadow-md' : 'bg-white text-slate-500 border border-slate-200'}`}
+            >
+                {type === 'today' ? 'Hari Ini' : type === 'week' ? '7 Hari' : 'Semua'}
+            </button>
+        ))}
       </div>
 
-      {/* CUSTOM DATE PICKER */}
-      {filterType === 'custom' && (
-        <div className="bg-white p-3 rounded-xl border border-slate-200 flex items-center gap-2 shadow-sm animate-in slide-in-from-top-2">
-          <div className="flex-1">
-            <label className="text-[10px] text-slate-400 font-bold">DARI</label>
-            <input 
-              type="date" 
-              value={startDate}
-              onChange={(e) => setStartDate(e.target.value)}
-              className="w-full text-xs font-bold text-slate-700 outline-none bg-transparent"
-            />
-          </div>
-          <div className="w-px h-8 bg-slate-200"></div>
-          <div className="flex-1">
-            <label className="text-[10px] text-slate-400 font-bold">SAMPAI</label>
-            <input 
-              type="date" 
-              value={endDate}
-              onChange={(e) => setEndDate(e.target.value)}
-              className="w-full text-xs font-bold text-slate-700 outline-none bg-transparent"
-            />
-          </div>
-        </div>
-      )}
-
-      {/* LIST */}
       {filteredLogs.length === 0 ? (
         <div className="bg-white p-8 rounded-xl border border-dashed border-slate-300 text-center text-slate-400 mt-4">
           <Filter size={32} className="mx-auto mb-2 opacity-30" />
-          <p className="text-sm">Tidak ada transaksi pada periode ini.</p>
+          <p className="text-sm">Tidak ada transaksi tercatat.</p>
         </div>
       ) : (
         <div className="space-y-2">
           {filteredLogs.map((log) => (
-            <div key={log.id} className="bg-white p-3 rounded-xl shadow-sm border border-slate-100 flex justify-between items-center">
+            <div key={log.id || Math.random()} className="bg-white p-3 rounded-xl shadow-sm border border-slate-100 flex justify-between items-center">
               <div className="flex items-start gap-3">
                  <div className={`p-2 rounded-lg mt-1 ${
                     log.type === 'in' || log.type === 'new' ? 'bg-green-50 text-green-600' : 'bg-red-50 text-red-600'
@@ -506,9 +438,9 @@ function HistoryView({ storeCode, appId, db }) {
                    <p className="font-bold text-slate-700 text-sm leading-tight mb-1">{log.productName}</p>
                    <div className="flex items-center gap-2 text-xs text-slate-400">
                      <Calendar size={10} />
-                     {log.timestamp?.seconds ? new Date(log.timestamp.seconds * 1000).toLocaleString('id-ID', {
+                     {log.dateObj.toLocaleString('id-ID', {
                         day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'
-                     }) : '-'}
+                     })}
                    </div>
                  </div>
               </div>
@@ -525,67 +457,59 @@ function HistoryView({ storeCode, appId, db }) {
   );
 }
 
-// --- SETTINGS YANG LEBIH BERSIH ---
 function SettingsView({ onCancel, storeCode }) {
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-300 pb-20">
-      
-      {/* Profil Toko */}
-      <div className="bg-gradient-to-br from-blue-600 to-blue-800 text-white p-6 rounded-2xl shadow-lg relative overflow-hidden">
+      <div className="bg-gradient-to-br from-green-600 to-green-800 text-white p-6 rounded-2xl shadow-lg relative overflow-hidden">
         <Store className="absolute -right-4 -bottom-4 opacity-20" size={120} />
         <div className="relative z-10">
-            <p className="text-blue-200 text-xs font-bold uppercase mb-1">Akun Toko Permanen</p>
+            <p className="text-green-200 text-xs font-bold uppercase mb-1">Mode Tanpa Server</p>
             <h2 className="text-3xl font-black tracking-tight">{storeCode}</h2>
-            <div className="mt-4 inline-flex items-center gap-2 bg-green-500/20 border border-green-500/30 px-3 py-1 rounded-full text-green-100 text-xs font-bold">
+            <div className="mt-4 inline-flex items-center gap-2 bg-white/20 border border-white/30 px-3 py-1 rounded-full text-white text-xs font-bold">
                 <CheckCircle size={12} />
                 Terhubung Google Sheet
             </div>
         </div>
       </div>
 
-      {/* Install Guide */}
       <div className="bg-white p-5 rounded-xl shadow-sm border border-slate-200">
-        <div className="flex items-center gap-3 mb-3 text-slate-800">
-          <div className="bg-purple-100 p-2 rounded-lg text-purple-700">
-            <Smartphone size={20} />
-          </div>
-          <h2 className="font-bold text-md">Install di HP</h2>
+        <h2 className="font-bold text-md mb-2">Konfigurasi Google Sheet</h2>
+        <div className="text-xs text-slate-600 space-y-3 leading-relaxed bg-slate-50 p-3 rounded-lg border border-slate-200">
+            <p>Jika Anda melihat pesan "Mode Demo", artinya Script belum diatur dengan benar.</p>
+            <ol className="list-decimal pl-4 space-y-1">
+                <li>Buka Script Editor di Google Sheet.</li>
+                <li>Klik tombol <b>Deploy</b> {'>'} <b>New Deployment</b>.</li>
+                <li>Pilih type: <b>Web app</b>.</li>
+                <li>Execute as: <b>Me</b> (Email Anda).</li>
+                <li>Who has access: <b>Anyone</b> (Siapa Saja).</li>
+                <li>Klik Deploy, copy URL baru, dan update kode.</li>
+            </ol>
         </div>
-        <p className="text-xs text-slate-500 leading-relaxed mb-3">
-            Aplikasi ini berbasis web (PWA). Agar tampil seperti aplikasi biasa di HP:
-        </p>
-        <ul className="text-xs text-slate-600 space-y-2 pl-4 list-disc marker:text-purple-400">
-            <li><b>Android (Chrome):</b> Klik menu titik tiga di pojok kanan atas {'>'} Pilih <b>"Tambahkan ke Layar Utama"</b> (Add to Home Screen).</li>
-            <li><b>iPhone (Safari):</b> Klik tombol Share (kotak panah atas) {'>'} Pilih <b>"Tambah ke Utama"</b> (Add to Home Screen).</li>
-        </ul>
       </div>
 
-      <button 
-        onClick={onCancel}
-        className="w-full py-3 bg-slate-100 text-slate-500 rounded-xl font-bold hover:bg-slate-200 transition-colors"
-      >
-        Tutup Pengaturan
+      <button onClick={onCancel} className="w-full py-3 bg-slate-100 text-slate-500 rounded-xl font-bold hover:bg-slate-200">
+        Tutup
       </button>
     </div>
   );
 }
 
-function HomeView({ inventory, onScanClick, onSearch, scannedCode, setScannedCode, onItemClick, onManualAdd }) {
-  const items = Object.values(inventory).sort((a, b) => (b.updatedAt?.seconds || 0) - (a.updatedAt?.seconds || 0));
+function HomeView({ inventory, onScanClick, onSearch, scannedCode, setScannedCode, onItemClick, onManualAdd, loading, isDemoMode }) {
+  const items = Object.values(inventory);
   const totalItems = items.length;
-  const totalStock = items.reduce((acc, curr) => acc + (curr.stock || 0), 0);
+  const totalStock = items.reduce((acc, curr) => acc + (parseInt(curr.stock) || 0), 0);
 
   return (
     <div className="space-y-6">
-      <div className="relative overflow-hidden bg-gradient-to-r from-blue-600 to-blue-700 p-5 rounded-2xl shadow-lg text-white">
+      <div className={`relative overflow-hidden ${isDemoMode ? 'bg-gradient-to-r from-orange-500 to-red-500' : 'bg-gradient-to-r from-blue-600 to-blue-700'} p-5 rounded-2xl shadow-lg text-white transition-colors`}>
         <div className="flex justify-between items-start">
            <div>
              <p className="text-blue-100 text-xs font-bold uppercase mb-1">Total Stok Aset</p>
-             <p className="text-4xl font-black">{totalStock}</p>
+             <p className="text-4xl font-black">{loading ? '...' : totalStock}</p>
            </div>
            <div className="text-right">
              <p className="text-blue-100 text-xs font-bold uppercase mb-1">Produk</p>
-             <p className="text-2xl font-bold">{totalItems}</p>
+             <p className="text-2xl font-bold">{loading ? '...' : totalItems}</p>
            </div>
         </div>
       </div>
@@ -595,7 +519,7 @@ function HomeView({ inventory, onScanClick, onSearch, scannedCode, setScannedCod
             <Search className="absolute left-3 top-2.5 text-slate-400" size={18} />
             <input 
               type="text" 
-              placeholder="Cari Produk..." 
+              placeholder="Cari ID atau Nama..." 
               className="w-full pl-9 pr-4 py-2 bg-transparent text-sm focus:outline-none"
               value={scannedCode}
               onChange={(e) => setScannedCode(e.target.value)}
@@ -615,10 +539,16 @@ function HomeView({ inventory, onScanClick, onSearch, scannedCode, setScannedCod
            </button>
         </div>
         
-        {items.length === 0 ? (
+        {loading ? (
+           <div className="space-y-3">
+             {[1,2,3].map(i => (
+               <div key={i} className="h-16 bg-white rounded-xl shadow-sm animate-pulse"></div>
+             ))}
+           </div>
+        ) : items.length === 0 ? (
           <div className="text-center py-10 text-slate-400 bg-white rounded-xl border border-dashed border-slate-300">
             <Package size={40} className="mx-auto mb-2 opacity-50" />
-            <p className="text-xs">Belum ada data di GRADE C.</p>
+            <p className="text-xs">Data kosong.</p>
           </div>
         ) : (
           <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden divide-y divide-slate-100">
@@ -630,7 +560,7 @@ function HomeView({ inventory, onScanClick, onSearch, scannedCode, setScannedCod
               >
                 <div>
                   <p className="font-bold text-slate-800 text-sm">{item.name || 'Tanpa Nama'}</p>
-                  <p className="text-[10px] text-slate-400 font-mono bg-slate-100 inline-block px-1 rounded mt-1">{item.barcode || item.id}</p>
+                  <p className="text-[10px] text-slate-400 font-mono bg-slate-100 inline-block px-1 rounded mt-1">{item.id}</p>
                 </div>
                 <div className={`px-3 py-1 rounded-full text-xs font-bold ${item.stock <= 5 ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>
                   {item.stock} Unit
@@ -778,10 +708,7 @@ function ProductDetailView({ product, setProduct, onSave, onBack }) {
 }
 
 function ScannerView({ onDetected, onCancel }) {
-  const [isSimulating, setIsSimulating] = useState(true);
-
-  // In real implementation, use Html5QrcodeScanner
-  // For preview, we use robust simulation
+  // Simulasi scanner
   const simulateScan = (code) => {
     onDetected(code);
   };
@@ -789,48 +716,29 @@ function ScannerView({ onDetected, onCancel }) {
   return (
     <div className="fixed inset-0 bg-black z-50 flex flex-col">
       <div className="relative flex-1 flex flex-col items-center justify-center">
-        
-        {/* Camera UI Overlay */}
         <div className="absolute inset-0 m-8 rounded-3xl overflow-hidden border border-slate-700 flex items-center justify-center bg-slate-900">
             <div className="text-center p-6">
                 <Camera className="mx-auto text-white mb-4 animate-pulse opacity-50" size={64} />
                 <p className="text-slate-400 text-xs mb-8">Arahkan kamera ke Barcode</p>
-
                 <div className="space-y-3 w-full max-w-[200px]">
-                    <button 
-                        onClick={() => simulateScan("8992761136014")}
-                        className="w-full bg-slate-800 text-blue-400 border border-slate-700 p-3 rounded-lg text-xs font-bold hover:bg-slate-700"
-                    >
-                        [TEST] Indomie
+                    <button onClick={() => simulateScan("8992761136014")} className="w-full bg-slate-800 text-blue-400 border border-slate-700 p-3 rounded-lg text-xs font-bold hover:bg-slate-700">
+                        [SIMULASI] Indomie
                     </button>
-                     <button 
-                        onClick={() => simulateScan("BRG-BARU-001")}
-                        className="w-full bg-slate-800 text-green-400 border border-slate-700 p-3 rounded-lg text-xs font-bold hover:bg-slate-700"
-                    >
-                        [TEST] Produk Baru
+                     <button onClick={() => simulateScan("BRG-BARU-001")} className="w-full bg-slate-800 text-green-400 border border-slate-700 p-3 rounded-lg text-xs font-bold hover:bg-slate-700">
+                        [SIMULASI] Produk Baru
                     </button>
                 </div>
             </div>
-            
-            {/* Scan Line Animation */}
             <div className="absolute left-0 right-0 h-0.5 bg-red-500 shadow-[0_0_15px_rgba(239,68,68,1)] animate-[scan_2s_ease-in-out_infinite] top-1/2"></div>
         </div>
-
-        <button 
-            onClick={onCancel}
-            className="absolute top-12 right-6 text-white bg-black/40 p-2 rounded-full backdrop-blur-md"
-        >
+        <button onClick={onCancel} className="absolute top-12 right-6 text-white bg-black/40 p-2 rounded-full backdrop-blur-md">
             <X size={24} />
         </button>
       </div>
-
       <div className="bg-black text-white p-8 pb-12 text-center">
-        <p className="text-sm font-medium opacity-80">
-          Pastikan cahaya cukup terang
-        </p>
+        <p className="text-sm font-medium opacity-80">Pastikan cahaya cukup terang</p>
       </div>
-
-      <style>{`
+       <style>{`
         @keyframes scan {
           0%, 100% { transform: translateY(-120px); opacity: 0; }
           50% { opacity: 1; }
