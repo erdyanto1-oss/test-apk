@@ -1,614 +1,842 @@
-<!DOCTYPE html>
-<html lang="id">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SOP Generator - Final Precision</title>
-    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
-    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
-        body { font-family: 'Inter', sans-serif; background-color: #52525b; } /* Background abu gelap */
-        
-        /* --- STYLE UTAMA DOKUMEN --- */
-        /* Kita buat kelas khusus agar konsisten antara tampilan dan cetak */
-        .a4-page {
-            width: 210mm; /* Lebar KUNCI A4 */
-            min-height: 297mm; /* Tinggi min A4 */
-            padding: 15mm 20mm; /* Margin dalam: Atas/Bawah 15mm, Kiri/Kanan 20mm */
-            background-color: white;
-            color: black;
-            box-sizing: border-box; /* Padding dihitung dalam lebar total */
-            position: relative;
+import React, { useState, useEffect, useMemo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getAuth, 
+  signInAnonymously, 
+  signInWithCustomToken,
+  onAuthStateChanged 
+} from 'firebase/auth';
+import { 
+  getFirestore, 
+  collection, 
+  doc, 
+  setDoc, 
+  updateDoc, 
+  addDoc,
+  onSnapshot, 
+  serverTimestamp,
+  increment
+} from 'firebase/firestore';
+import { 
+  Scan, 
+  Package, 
+  Plus, 
+  Minus, 
+  Save, 
+  History, 
+  Search, 
+  ArrowLeft, 
+  X,
+  Camera,
+  PlusCircle, 
+  PenTool,
+  Clock,
+  ArrowUpRight,
+  ArrowDownLeft,
+  Settings,
+  CheckCircle,
+  Store,
+  Calendar,
+  Filter,
+  Smartphone,
+  Wifi
+} from 'lucide-react';
+
+/* KONFIGURASI FIREBASE & INISIALISASI */
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'stock-app-default';
+
+// --- KONFIGURASI PERMANEN ---
+const PERMANENT_STORE_CODE = "GRADE C";
+const PERMANENT_SHEET_URL = "https://script.google.com/macros/s/AKfycbxQrGCb1G-MDSTtlal365bRQRnxDoXMcXlgmkO7dc-_PyMnHy-y6qeRywsbTsmazgUm/exec";
+
+// --- KOMPONEN UTAMA ---
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  // Store Code dan Sheet URL sekarang permanen (hardcoded)
+  const storeCode = PERMANENT_STORE_CODE;
+  const sheetUrl = PERMANENT_SHEET_URL;
+
+  const [view, setView] = useState('home'); // Langsung masuk home, tidak ada login
+  const [inventory, setInventory] = useState({});
+  const [currentProduct, setCurrentProduct] = useState(null);
+  const [scannedCode, setScannedCode] = useState('');
+  const [loading, setLoading] = useState(true);
+
+  // --- AUTHENTICATION & SETUP ---
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
         }
+      } catch (error) {
+        console.error("Auth Error:", error);
+      }
+    };
+    initAuth();
 
-        /* Tampilan di Layar (User Interface) */
-        #sop-viewer-container {
-            display: flex;
-            justify-content: center;
-            padding: 20px;
-        }
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      // Loading akan dimatikan oleh listener snapshot di bawah
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // --- DATA SYNC (FIRESTORE) ---
+  useEffect(() => {
+    if (!user) return;
+    
+    setLoading(true);
+    // Path: public/data/GRADE C_inventory
+    const collectionName = `${storeCode}_inventory`;
+    const inventoryRef = collection(db, 'artifacts', appId, 'public', 'data', collectionName);
+    
+    const unsubscribe = onSnapshot(inventoryRef, (snapshot) => {
+      const items = {};
+      snapshot.forEach((doc) => {
+        items[doc.id] = { id: doc.id, ...doc.data() };
+      });
+      setInventory(items);
+      setLoading(false);
+    }, (error) => {
+      console.error("Error fetching inventory:", error);
+      setLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, [user]);
+
+  // --- GOOGLE SHEET SYNC ---
+  const syncToGoogleSheet = async (payload) => {
+    // Selalu kirim karena URL sudah permanen
+    try {
+      await fetch(sheetUrl, {
+        method: 'POST',
+        mode: 'no-cors', 
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...payload, store: storeCode })
+      });
+    } catch (error) { console.error("Sheet Error", error); }
+  };
+
+  // --- ACTIONS ---
+
+  const handleScanSuccess = async (code) => {
+    setScannedCode(code);
+    const existingProduct = inventory[code];
+    if (existingProduct) {
+      setCurrentProduct({ ...existingProduct, isNew: false });
+    } else {
+      setCurrentProduct({ id: code, name: '', stock: 0, isNew: true });
+    }
+    setView('product');
+  };
+
+  const saveProductTransaction = async (amount, type) => {
+    if (!user || !currentProduct) return;
+
+    const finalId = currentProduct.id.trim() || `NO-ID-${Date.now()}`;
+    const collectionInv = `${storeCode}_inventory`;
+    const collectionLogs = `${storeCode}_logs`;
+
+    const productRef = doc(db, 'artifacts', appId, 'public', 'data', collectionInv, finalId);
+    const logsRef = collection(db, 'artifacts', appId, 'public', 'data', collectionLogs);
+    
+    const timestamp = serverTimestamp();
+    const numAmount = parseInt(amount);
+    const finalName = currentProduct.name || 'Produk Tanpa Nama';
+    let finalStock = currentProduct.stock || 0;
+
+    try {
+      if (currentProduct.isNew) {
+        finalStock = numAmount;
+        await setDoc(productRef, {
+          name: finalName,
+          stock: numAmount,
+          updatedAt: timestamp,
+          barcode: finalId
+        }, { merge: true });
+
+        await addDoc(logsRef, {
+          productId: finalId,
+          productName: finalName,
+          type: 'new',
+          amount: numAmount,
+          timestamp: timestamp
+        });
         
-        #sop-document {
-            /* Shadow untuk efek kertas di layar */
-            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-        }
+        syncToGoogleSheet({ action: 'add_log', id: finalId, name: finalName, type: 'BARU (+)', amount: numAmount });
 
-        /* --- Helper Styles --- */
-        table { width: 100% !important; table-layout: fixed; border-collapse: collapse; }
-        td, th { overflow-wrap: break-word; word-wrap: break-word; }
-        img { max-width: 100%; height: auto; display: block; }
+      } else {
+        const adjustment = type === 'in' ? numAmount : -numAmount;
+        finalStock = (currentProduct.stock || 0) + adjustment;
         
-        /* Mencegah pemotongan elemen */
-        .avoid-break { page-break-inside: avoid; break-inside: avoid; }
-        tr { page-break-inside: avoid; }
-    </style>
-</head>
-<body>
-    <div id="root"></div>
+        await updateDoc(productRef, {
+          stock: increment(adjustment),
+          updatedAt: timestamp
+        });
 
-    <script type="text/babel">
-        const { useState, useRef, useEffect } = React;
+        await addDoc(logsRef, {
+          productId: finalId,
+          productName: finalName || currentProduct.id,
+          type: type,
+          amount: numAmount,
+          timestamp: timestamp
+        });
 
-        // --- ICONS ---
-        const DownloadIcon = () => (
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-            <polyline points="7 10 12 15 17 10"></polyline>
-            <line x1="12" y1="15" x2="12" y2="3"></line>
-          </svg>
-        );
+        syncToGoogleSheet({ 
+          action: 'add_log', id: finalId, name: finalName, 
+          type: type === 'in' ? 'MASUK (+)' : 'KELUAR (-)', amount: numAmount 
+        });
+      }
 
-        const UploadIcon = () => (
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-            <polyline points="17 8 12 3 7 8"></polyline>
-            <line x1="12" y1="3" x2="12" y2="15"></line>
-          </svg>
-        );
+      syncToGoogleSheet({ action: 'update_inventory', id: finalId, name: finalName, stock: finalStock });
+      
+      setView('home');
+      setScannedCode('');
+      setCurrentProduct(null);
+    } catch (error) {
+      console.error("Gagal menyimpan:", error);
+      alert("Gagal menyimpan data.");
+    }
+  };
 
-        const LoadingIcon = () => (
-          <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-          </svg>
-        );
+  // --- RENDERERS ---
 
-        // --- COMPONENTS ---
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center text-slate-500 font-sans">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mb-4"></div>
+        <p>Memuat Toko {storeCode}...</p>
+      </div>
+    );
+  }
 
-        const ImageUploader = ({ label, id, onImageUpload, currentImage, caption }) => {
-          const fileInputRef = useRef(null);
-
-          const handleFileChange = (e) => {
-            const file = e.target.files[0];
-            if (file) {
-              const reader = new FileReader();
-              reader.onloadend = () => {
-                onImageUpload(id, reader.result);
-              };
-              reader.readAsDataURL(file);
-            }
-          };
-
-          return (
-            <div className="flex flex-col items-center justify-start border border-dashed border-gray-400 rounded p-1 bg-gray-50 hover:bg-gray-100 transition-colors h-full min-h-[140px] box-border relative avoid-break">
-              {currentImage ? (
-                <div className="relative w-full flex flex-col items-center h-full">
-                  <img 
-                    src={currentImage} 
-                    alt={label} 
-                    className="h-[120px] w-auto object-contain rounded shadow-sm"
-                  />
-                  <button 
-                    onClick={() => fileInputRef.current.click()}
-                    className="mt-1 text-[10px] text-blue-600 underline cursor-pointer hover:text-blue-800"
-                    type="button"
-                    data-html2canvas-ignore="true"
-                  >
-                    Ganti
-                  </button>
-                  <p className="mt-1 text-[10px] font-bold text-gray-900 text-center leading-tight px-1 uppercase">{label}</p>
-                </div>
-              ) : (
-                <div 
-                  onClick={() => fileInputRef.current.click()}
-                  className="cursor-pointer text-center w-full py-2 flex flex-col items-center justify-center h-full"
-                >
-                  <div className="text-gray-400 mb-1"><UploadIcon /></div>
-                  <p className="text-[10px] text-gray-600 font-bold leading-tight">{label}</p>
-                  <p className="text-[9px] text-gray-400 mt-1" data-html2canvas-ignore="true">Klik upload</p>
-                </div>
-              )}
-              <input 
-                type="file" 
-                ref={fileInputRef} 
-                onChange={handleFileChange} 
-                accept="image/*" 
-                className="hidden" 
-                data-html2canvas-ignore="true"
-              />
-              {caption && (
-                <div className="mt-auto pt-1 w-full border-t border-gray-200">
-                    <p className="text-[9px] text-gray-700 text-center leading-tight italic">{caption}</p>
-                </div>
-              )}
-            </div>
-          );
-        };
-
-        const SectionHeader = ({ title }) => (
-          <div className="mt-6 mb-3 border-b-2 border-black pb-1 w-full">
-            <h2 className="text-lg font-bold uppercase text-gray-900">
-                {title}
-            </h2>
+  return (
+    <div className="min-h-screen bg-slate-100 font-sans text-slate-800 max-w-md mx-auto shadow-2xl overflow-hidden relative flex flex-col">
+      
+      {/* HEADER BARU: Dengan Indikator Online */}
+      <header className="bg-blue-600 text-white p-4 shadow-md sticky top-0 z-20">
+        <div className="flex justify-between items-center">
+          <div className="flex flex-col">
+            <h1 className="text-lg font-bold flex items-center gap-2">
+              <Package size={20} /> Stok Pintar
+            </h1>
+            <span className="text-[10px] opacity-90 font-mono flex items-center gap-1 bg-blue-700 px-2 py-0.5 rounded-full w-fit mt-1 border border-blue-500">
+              <Store size={10} /> {storeCode}
+            </span>
           </div>
-        );
-
-        const TableHeader = ({ children }) => (
-          <th className="border border-black px-2 py-1.5 bg-gray-200 text-center text-xs font-bold uppercase tracking-wider text-black">
-            {children}
-          </th>
-        );
-
-        const TableCell = ({ children, className = "", align = "center" }) => (
-          <td className={`border border-black px-2 py-1.5 text-xs align-middle text-${align} ${className} text-black`}>
-            {children}
-          </td>
-        );
-
-        const ImageGrid = ({ sectionId, count, labels, captions, images, onUpload }) => {
-          return (
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-              {Array.from({ length: count }).map((_, idx) => (
-                <div key={`${sectionId}_${idx}`} className="flex flex-col h-full bg-white p-1 rounded">
-                    <ImageUploader
-                    id={`${sectionId}_${idx}`}
-                    label={labels[idx] || `Foto ${idx + 1}`}
-                    currentImage={images[`${sectionId}_${idx}`]}
-                    onImageUpload={onUpload}
-                    caption={captions && captions[idx] ? captions[idx] : null}
-                    />
-                </div>
-              ))}
+          <div className="flex items-center gap-3">
+            {/* Indikator Online di Header */}
+            <div className="flex items-center gap-1 text-[10px] font-bold bg-green-500 px-2 py-1 rounded text-white shadow-sm animate-in fade-in">
+                <Wifi size={10} /> ONLINE
             </div>
-          );
-        };
 
-        const SectionWrapper = ({ children, className = "" }) => (
-          <div className={`mb-6 avoid-break ${className}`}>
-            {children}
+            {view === 'home' && (
+               <button onClick={() => setView('settings')} className="text-blue-100 hover:text-white p-1">
+                 <Settings size={22} />
+               </button>
+            )}
+            {view !== 'home' && (
+              <button onClick={() => setView('home')} className="text-blue-100 hover:text-white">
+                <X size={24} />
+              </button>
+            )}
           </div>
-        );
+        </div>
+      </header>
 
-        function SOPGenerator() {
-          const [images, setImages] = useState({});
-          const [isLibraryLoaded, setIsLibraryLoaded] = useState(false);
-          const [isGenerating, setIsGenerating] = useState(false);
+      {/* MAIN CONTENT */}
+      <main className="flex-1 overflow-y-auto p-4 pb-24 bg-slate-50 scroll-smooth">
+        
+        {view === 'home' && (
+          <HomeView 
+            inventory={inventory} 
+            onScanClick={() => setView('scan')} 
+            onSearch={(e) => {
+              e.preventDefault();
+              if(scannedCode.trim()) handleScanSuccess(scannedCode.trim());
+            }}
+            scannedCode={scannedCode}
+            setScannedCode={setScannedCode}
+            onItemClick={(item) => {
+              setCurrentProduct({ ...item, isNew: false });
+              setView('product');
+            }}
+            onManualAdd={() => {
+               const tempId = `MANUAL-${Math.floor(Math.random() * 10000)}`;
+               setCurrentProduct({ id: tempId, name: '', stock: 0, isNew: true, isManualInput: true });
+               setView('product');
+            }}
+          />
+        )}
 
-          useEffect(() => {
-            const script = document.createElement('script');
-            script.src = "https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js";
-            script.onload = () => setIsLibraryLoaded(true);
-            script.onerror = () => alert("Gagal memuat pustaka PDF. Refresh halaman.");
-            document.body.appendChild(script);
+        {view === 'settings' && (
+          <SettingsView 
+            onCancel={() => setView('home')}
+            storeCode={storeCode}
+          />
+        )}
 
-            return () => {
-              document.body.removeChild(script);
-            }
-          }, []);
+        {view === 'history' && (
+          <HistoryView 
+            storeCode={storeCode} 
+            appId={appId} 
+            db={db} 
+          />
+        )}
 
-          const handleImageUpload = (id, url) => {
-            setImages(prev => ({ ...prev, [id]: url }));
-          };
+        {view === 'scan' && (
+          <ScannerView 
+            onDetected={handleScanSuccess} 
+            onCancel={() => setView('home')} 
+          />
+        )}
 
-          const handleDownloadPDF = () => {
-            if (!isLibraryLoaded) {
-              alert("Tunggu sebentar, sistem sedang memuat...");
-              return;
-            }
+        {view === 'product' && currentProduct && (
+          <ProductDetailView 
+            product={currentProduct}
+            setProduct={setCurrentProduct}
+            onSave={saveProductTransaction}
+            onBack={() => setView('home')}
+          />
+        )}
 
-            setIsGenerating(true);
-            
-            // 1. Dapatkan elemen asli
-            const element = document.getElementById('sop-document');
-            
-            // 2. Clone (Salin) elemen tersebut
-            const clone = element.cloneNode(true);
-            
-            // 3. Konfigurasi CLONE untuk PDF (Wajib agar tidak terpotong)
-            // Hilangkan shadow, margin, dan paksa lebar A4
-            clone.style.margin = '0';
-            clone.style.boxShadow = 'none';
-            clone.style.width = '210mm'; // Pastikan lebar tetap A4
-            clone.style.maxWidth = '210mm';
-            clone.style.height = 'auto';
-            
-            // 4. Buat Container Tersembunyi (Isolation Chamber)
-            // Ini trik agar html2canvas memotret area yang bersih dan full-width
-            const container = document.createElement('div');
-            container.style.position = 'fixed';
-            container.style.top = '0';
-            container.style.left = '0';
-            container.style.width = '210mm'; // Lebar Container = Lebar A4
-            container.style.zIndex = '-9999'; // Sembunyikan di belakang
-            
-            container.appendChild(clone);
-            document.body.appendChild(container);
+      </main>
 
-            // 5. Opsi PDF
-            const opt = {
-              margin:       0, // Margin nol karena kita sudah pakai padding di CSS
-              filename:     'SOP_Packing_Clean.pdf',
-              image:        { type: 'jpeg', quality: 0.98 },
-              html2canvas:  { 
-                scale: 2, 
-                useCORS: true, 
-                scrollY: 0, 
-                scrollX: 0,
-                x: 0,
-                y: 0,
-                logging: false,
-                backgroundColor: '#ffffff', // Wajib putih agar tidak hitam
-                windowWidth: 800 // Lebar virtual window (sedikit > 794px A4) agar tidak cutoff kanan
-              },
-              jsPDF:        { unit: 'mm', format: 'a4', orientation: 'portrait' },
-              pagebreak:    { mode: ['avoid-all', 'css', 'legacy'] } 
-            };
+      {/* BOTTOM NAVIGATION */}
+      {(view === 'home' || view === 'history') && (
+        <nav className="fixed bottom-0 left-0 right-0 max-w-md mx-auto bg-white border-t border-slate-200 px-6 pb-4 pt-2 flex justify-between items-end text-xs text-slate-500 z-20 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
+          
+          <button 
+            onClick={() => setView('home')}
+            className={`flex flex-col items-center gap-1 w-16 transition-colors ${view === 'home' ? 'text-blue-600 font-bold' : 'text-slate-400'}`}
+          >
+            <Package size={24} strokeWidth={view === 'home' ? 2.5 : 2} />
+            <span>Stok</span>
+          </button>
 
-            // 6. Generate dari CLONE (bukan tampilan layar)
-            window.html2pdf()
-              .from(clone)
-              .set(opt)
-              .save()
-              .then(() => {
-                document.body.removeChild(container);
-                setIsGenerating(false);
-              })
-              .catch((err) => {
-                console.error(err);
-                if (document.body.contains(container)) {
-                    document.body.removeChild(container);
-                }
-                setIsGenerating(false);
-                alert("Gagal membuat PDF. Coba refresh.");
-              });
-          };
+          <button 
+            onClick={() => {
+               const tempId = `MANUAL-${Math.floor(Math.random() * 10000)}`;
+               setCurrentProduct({ id: tempId, name: '', stock: 0, isNew: true, isManualInput: true });
+               setView('product');
+            }}
+            className="flex flex-col items-center gap-1 text-slate-400 hover:text-blue-600 w-16"
+          >
+            <PlusCircle size={24} />
+            <span>Tambah</span>
+          </button>
 
-          return (
-            <div className="min-h-screen p-4 font-sans text-gray-900 relative">
-              
-              {/* Control Panel (Fixed Top) */}
-              <div className="sticky top-4 z-50 w-full max-w-[210mm] mx-auto mb-6 bg-white p-4 rounded-lg shadow-xl border-l-4 border-blue-600 flex justify-between items-center" data-html2canvas-ignore="true">
+          <button 
+            onClick={() => setView('scan')}
+            className="flex flex-col items-center justify-center -mt-10 bg-gradient-to-br from-blue-500 to-blue-700 text-white w-16 h-16 rounded-full shadow-lg border-4 border-slate-100 active:scale-95 transition-transform group"
+          >
+            <Scan size={28} />
+          </button>
+          
+           <button 
+             onClick={() => setView('history')}
+             className={`flex flex-col items-center gap-1 w-16 transition-colors ${view === 'history' ? 'text-blue-600 font-bold' : 'text-slate-400'}`}
+           >
+            <History size={24} strokeWidth={view === 'history' ? 2.5 : 2} />
+            <span>Riwayat</span>
+          </button>
+        </nav>
+      )}
+    </div>
+  );
+}
+
+// --- VIEW COMPONENTS ---
+
+function HistoryView({ storeCode, appId, db }) {
+  const [logs, setLogs] = useState([]);
+  const [loading, setLoading] = useState(true);
+  
+  // Filter States
+  const [filterType, setFilterType] = useState('today'); // today, week, custom, all
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
+
+  useEffect(() => {
+    if (!storeCode) return;
+    
+    // Fetch logs collection
+    const collectionLogs = `${storeCode}_logs`;
+    const logsRef = collection(db, 'artifacts', appId, 'public', 'data', collectionLogs);
+    
+    const unsubscribe = onSnapshot(logsRef, (snapshot) => {
+      const data = [];
+      snapshot.forEach(doc => {
+        data.push({ id: doc.id, ...doc.data() });
+      });
+      // Sort descending
+      data.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
+      setLogs(data);
+      setLoading(false);
+    }, (err) => {
+      console.error("Error fetching logs", err);
+      setLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, [storeCode]);
+
+  // Filtering Logic
+  const filteredLogs = useMemo(() => {
+    if (!logs.length) return [];
+    
+    const now = new Date();
+    const startOfDay = new Date(now.setHours(0,0,0,0));
+    
+    return logs.filter(log => {
+      if (!log.timestamp) return false;
+      const logDate = new Date(log.timestamp.seconds * 1000);
+      const logDay = new Date(logDate).setHours(0,0,0,0);
+
+      if (filterType === 'today') {
+        return logDay === startOfDay.getTime();
+      }
+      if (filterType === 'week') {
+        const sevenDaysAgo = new Date(now);
+        sevenDaysAgo.setDate(now.getDate() - 7);
+        return logDate >= sevenDaysAgo;
+      }
+      if (filterType === 'custom') {
+        if (!startDate || !endDate) return true; // Show all if incomplete
+        const start = new Date(startDate).setHours(0,0,0,0);
+        const end = new Date(endDate).setHours(23,59,59,999);
+        return logDay >= start && logDay <= end;
+      }
+      return true; // All
+    });
+  }, [logs, filterType, startDate, endDate]);
+
+  if (loading) return <div className="p-8 text-center text-slate-400">Memuat riwayat...</div>;
+
+  return (
+    <div className="space-y-4 animate-in fade-in duration-300 pb-20">
+      <div className="flex items-center justify-between mb-2">
+        <h2 className="font-bold text-xl text-slate-800 flex items-center gap-2">
+          <Clock className="text-blue-600" /> Riwayat
+        </h2>
+        <div className="text-xs font-mono bg-blue-50 text-blue-600 px-2 py-1 rounded">
+          {filteredLogs.length} Transaksi
+        </div>
+      </div>
+
+      {/* FILTER BUTTONS */}
+      <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">
+        <button 
+          onClick={() => setFilterType('today')}
+          className={`px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap transition-colors ${filterType === 'today' ? 'bg-blue-600 text-white shadow-md' : 'bg-white text-slate-500 border border-slate-200'}`}
+        >
+          Hari Ini
+        </button>
+        <button 
+          onClick={() => setFilterType('week')}
+          className={`px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap transition-colors ${filterType === 'week' ? 'bg-blue-600 text-white shadow-md' : 'bg-white text-slate-500 border border-slate-200'}`}
+        >
+          7 Hari
+        </button>
+        <button 
+          onClick={() => setFilterType('custom')}
+          className={`px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap transition-colors ${filterType === 'custom' ? 'bg-blue-600 text-white shadow-md' : 'bg-white text-slate-500 border border-slate-200'}`}
+        >
+          Pilih Tanggal
+        </button>
+         <button 
+          onClick={() => setFilterType('all')}
+          className={`px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap transition-colors ${filterType === 'all' ? 'bg-blue-600 text-white shadow-md' : 'bg-white text-slate-500 border border-slate-200'}`}
+        >
+          Semua
+        </button>
+      </div>
+
+      {/* CUSTOM DATE PICKER */}
+      {filterType === 'custom' && (
+        <div className="bg-white p-3 rounded-xl border border-slate-200 flex items-center gap-2 shadow-sm animate-in slide-in-from-top-2">
+          <div className="flex-1">
+            <label className="text-[10px] text-slate-400 font-bold">DARI</label>
+            <input 
+              type="date" 
+              value={startDate}
+              onChange={(e) => setStartDate(e.target.value)}
+              className="w-full text-xs font-bold text-slate-700 outline-none bg-transparent"
+            />
+          </div>
+          <div className="w-px h-8 bg-slate-200"></div>
+          <div className="flex-1">
+            <label className="text-[10px] text-slate-400 font-bold">SAMPAI</label>
+            <input 
+              type="date" 
+              value={endDate}
+              onChange={(e) => setEndDate(e.target.value)}
+              className="w-full text-xs font-bold text-slate-700 outline-none bg-transparent"
+            />
+          </div>
+        </div>
+      )}
+
+      {/* LIST */}
+      {filteredLogs.length === 0 ? (
+        <div className="bg-white p-8 rounded-xl border border-dashed border-slate-300 text-center text-slate-400 mt-4">
+          <Filter size={32} className="mx-auto mb-2 opacity-30" />
+          <p className="text-sm">Tidak ada transaksi pada periode ini.</p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {filteredLogs.map((log) => (
+            <div key={log.id} className="bg-white p-3 rounded-xl shadow-sm border border-slate-100 flex justify-between items-center">
+              <div className="flex items-start gap-3">
+                 <div className={`p-2 rounded-lg mt-1 ${
+                    log.type === 'in' || log.type === 'new' ? 'bg-green-50 text-green-600' : 'bg-red-50 text-red-600'
+                 }`}>
+                   {log.type === 'in' || log.type === 'new' ? <ArrowDownLeft size={16}/> : <ArrowUpRight size={16}/>}
+                 </div>
+                 <div>
+                   <p className="font-bold text-slate-700 text-sm leading-tight mb-1">{log.productName}</p>
+                   <div className="flex items-center gap-2 text-xs text-slate-400">
+                     <Calendar size={10} />
+                     {log.timestamp?.seconds ? new Date(log.timestamp.seconds * 1000).toLocaleString('id-ID', {
+                        day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'
+                     }) : '-'}
+                   </div>
+                 </div>
+              </div>
+              <div className={`font-bold text-lg ${
+                  log.type === 'in' || log.type === 'new' ? 'text-green-600' : 'text-red-600'
+              }`}>
+                {log.type === 'out' ? '-' : '+'}{log.amount}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// --- SETTINGS YANG LEBIH BERSIH ---
+function SettingsView({ onCancel, storeCode }) {
+  return (
+    <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-300 pb-20">
+      
+      {/* Profil Toko */}
+      <div className="bg-gradient-to-br from-blue-600 to-blue-800 text-white p-6 rounded-2xl shadow-lg relative overflow-hidden">
+        <Store className="absolute -right-4 -bottom-4 opacity-20" size={120} />
+        <div className="relative z-10">
+            <p className="text-blue-200 text-xs font-bold uppercase mb-1">Akun Toko Permanen</p>
+            <h2 className="text-3xl font-black tracking-tight">{storeCode}</h2>
+            <div className="mt-4 inline-flex items-center gap-2 bg-green-500/20 border border-green-500/30 px-3 py-1 rounded-full text-green-100 text-xs font-bold">
+                <CheckCircle size={12} />
+                Terhubung Google Sheet
+            </div>
+        </div>
+      </div>
+
+      {/* Install Guide */}
+      <div className="bg-white p-5 rounded-xl shadow-sm border border-slate-200">
+        <div className="flex items-center gap-3 mb-3 text-slate-800">
+          <div className="bg-purple-100 p-2 rounded-lg text-purple-700">
+            <Smartphone size={20} />
+          </div>
+          <h2 className="font-bold text-md">Install di HP</h2>
+        </div>
+        <p className="text-xs text-slate-500 leading-relaxed mb-3">
+            Aplikasi ini berbasis web (PWA). Agar tampil seperti aplikasi biasa di HP:
+        </p>
+        <ul className="text-xs text-slate-600 space-y-2 pl-4 list-disc marker:text-purple-400">
+            <li><b>Android (Chrome):</b> Klik menu titik tiga di pojok kanan atas {'>'} Pilih <b>"Tambahkan ke Layar Utama"</b> (Add to Home Screen).</li>
+            <li><b>iPhone (Safari):</b> Klik tombol Share (kotak panah atas) {'>'} Pilih <b>"Tambah ke Utama"</b> (Add to Home Screen).</li>
+        </ul>
+      </div>
+
+      <button 
+        onClick={onCancel}
+        className="w-full py-3 bg-slate-100 text-slate-500 rounded-xl font-bold hover:bg-slate-200 transition-colors"
+      >
+        Tutup Pengaturan
+      </button>
+    </div>
+  );
+}
+
+function HomeView({ inventory, onScanClick, onSearch, scannedCode, setScannedCode, onItemClick, onManualAdd }) {
+  const items = Object.values(inventory).sort((a, b) => (b.updatedAt?.seconds || 0) - (a.updatedAt?.seconds || 0));
+  const totalItems = items.length;
+  const totalStock = items.reduce((acc, curr) => acc + (curr.stock || 0), 0);
+
+  return (
+    <div className="space-y-6">
+      <div className="relative overflow-hidden bg-gradient-to-r from-blue-600 to-blue-700 p-5 rounded-2xl shadow-lg text-white">
+        <div className="flex justify-between items-start">
+           <div>
+             <p className="text-blue-100 text-xs font-bold uppercase mb-1">Total Stok Aset</p>
+             <p className="text-4xl font-black">{totalStock}</p>
+           </div>
+           <div className="text-right">
+             <p className="text-blue-100 text-xs font-bold uppercase mb-1">Produk</p>
+             <p className="text-2xl font-bold">{totalItems}</p>
+           </div>
+        </div>
+      </div>
+
+      <div className="bg-white p-2 rounded-xl shadow-sm border border-slate-200 flex gap-2">
+        <div className="relative flex-1">
+            <Search className="absolute left-3 top-2.5 text-slate-400" size={18} />
+            <input 
+              type="text" 
+              placeholder="Cari Produk..." 
+              className="w-full pl-9 pr-4 py-2 bg-transparent text-sm focus:outline-none"
+              value={scannedCode}
+              onChange={(e) => setScannedCode(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && onSearch(e)}
+            />
+        </div>
+        <button onClick={onSearch} className="bg-slate-100 text-slate-600 px-4 py-2 rounded-lg font-bold text-xs hover:bg-slate-200">
+            Cari
+        </button>
+      </div>
+
+      <div className="pb-10">
+        <div className="flex justify-between items-center mb-3">
+           <h2 className="font-bold text-slate-700 text-sm">Inventaris</h2>
+           <button onClick={onManualAdd} className="text-blue-600 text-xs font-bold flex items-center gap-1">
+             <PlusCircle size={14}/> Baru
+           </button>
+        </div>
+        
+        {items.length === 0 ? (
+          <div className="text-center py-10 text-slate-400 bg-white rounded-xl border border-dashed border-slate-300">
+            <Package size={40} className="mx-auto mb-2 opacity-50" />
+            <p className="text-xs">Belum ada data di GRADE C.</p>
+          </div>
+        ) : (
+          <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden divide-y divide-slate-100">
+            {items.map((item) => (
+              <div 
+                key={item.id} 
+                onClick={() => onItemClick(item)}
+                className="p-4 flex justify-between items-center hover:bg-slate-50 active:bg-slate-100 cursor-pointer transition-colors"
+              >
                 <div>
-                  <h1 className="text-xl font-bold text-gray-800">Generator SOP (Fixed Alignment)</h1>
-                  <p className="text-sm text-gray-600">
-                     Versi final: Layout A4 presisi, tidak terpotong.
-                  </p>
+                  <p className="font-bold text-slate-800 text-sm">{item.name || 'Tanpa Nama'}</p>
+                  <p className="text-[10px] text-slate-400 font-mono bg-slate-100 inline-block px-1 rounded mt-1">{item.barcode || item.id}</p>
                 </div>
-                <div className="flex flex-col items-end">
+                <div className={`px-3 py-1 rounded-full text-xs font-bold ${item.stock <= 5 ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>
+                  {item.stock} Unit
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ProductDetailView({ product, setProduct, onSave, onBack }) {
+  const [mode, setMode] = useState('view'); 
+  const [amount, setAmount] = useState('');
+  const [newName, setNewName] = useState(product.name);
+  const [customId, setCustomId] = useState(product.id);
+
+  const handleAction = (type) => {
+    if (!amount || parseInt(amount) <= 0) return;
+    onSave(amount, type);
+  };
+
+  return (
+    <div className="space-y-4 animate-in slide-in-from-bottom-4 duration-300 pb-20">
+      <button onClick={onBack} className="flex items-center text-slate-500 hover:text-slate-800 mb-2 font-bold text-xs">
+        <ArrowLeft size={16} className="mr-1" /> KEMBALI
+      </button>
+
+      <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 text-center relative overflow-hidden">
+        <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-blue-400 to-blue-600"></div>
+        
+        <div className="mb-4">
+          {product.isNew ? (
+             <div className="space-y-2">
+                 <input
+                    type="text"
+                    value={newName}
+                    onChange={(e) => {
+                        setNewName(e.target.value);
+                        setProduct(prev => ({...prev, name: e.target.value}));
+                    }}
+                    placeholder="Nama Produk..."
+                    className="w-full text-center text-xl font-bold border-b-2 border-blue-100 focus:border-blue-500 outline-none pb-2 placeholder:text-slate-300"
+                    autoFocus
+                  />
+                  {product.isManualInput && (
+                    <div className="flex items-center justify-center gap-1 text-slate-400">
+                        <PenTool size={12} />
+                        <input 
+                            value={customId}
+                            onChange={(e) => {
+                                setCustomId(e.target.value);
+                                setProduct(prev => ({...prev, id: e.target.value}));
+                            }}
+                            className="text-xs font-mono text-center bg-transparent outline-none w-32" 
+                        />
+                    </div>
+                  )}
+             </div>
+          ) : (
+            <>
+                <h2 className="text-xl font-bold text-slate-800 leading-tight">{product.name}</h2>
+                <p className="text-xs text-slate-400 font-mono mt-1">{product.id}</p>
+            </>
+          )}
+        </div>
+
+        <div className="py-4">
+          <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Stok Tersedia</span>
+          <div className="text-5xl font-black text-slate-800 mt-1">{product.stock}</div>
+        </div>
+      </div>
+
+      {mode === 'view' ? (
+        <div className="grid grid-cols-2 gap-3">
+          <button 
+            onClick={() => setMode('add')}
+            className="flex items-center justify-center gap-3 p-4 bg-green-600 text-white rounded-xl shadow-lg active:scale-95 transition-transform"
+          >
+            <PlusCircle size={24} />
+            <div className="text-left">
+                <p className="font-bold text-sm">Masuk</p>
+                <p className="text-[10px] opacity-80">Tambah Stok</p>
+            </div>
+          </button>
+
+          <button 
+            onClick={() => setMode('remove')}
+            className="flex items-center justify-center gap-3 p-4 bg-red-600 text-white rounded-xl shadow-lg active:scale-95 transition-transform"
+          >
+            <Minus size={24} />
+            <div className="text-left">
+                <p className="font-bold text-sm">Keluar</p>
+                <p className="text-[10px] opacity-80">Kurangi Stok</p>
+            </div>
+          </button>
+        </div>
+      ) : (
+        <div className="bg-white p-5 rounded-xl shadow-lg border border-slate-100 animate-in zoom-in-95 duration-200">
+          <div className="flex justify-between items-center mb-6">
+            <h3 className={`font-bold text-lg ${mode === 'add' ? 'text-green-600' : 'text-red-600'}`}>
+              {mode === 'add' ? 'Barang Masuk (+)' : 'Barang Keluar (-)'}
+            </h3>
+            <button onClick={() => setMode('view')} className="bg-slate-100 p-1 rounded-full text-slate-500">
+              <X size={20} />
+            </button>
+          </div>
+
+          <div className="flex gap-3 items-center mb-6">
+            <button 
+              onClick={() => setAmount(prev => Math.max(0, (parseInt(prev)||0) - 1).toString())}
+              className="w-12 h-12 bg-slate-100 rounded-xl flex items-center justify-center font-bold text-xl text-slate-600 active:bg-slate-200"
+            >-</button>
+            <input 
+              type="number" 
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              placeholder="0"
+              className="flex-1 text-center text-4xl font-bold py-2 outline-none text-slate-800"
+              autoFocus
+            />
+            <button 
+              onClick={() => setAmount(prev => ((parseInt(prev)||0) + 1).toString())}
+              className="w-12 h-12 bg-slate-100 rounded-xl flex items-center justify-center font-bold text-xl text-slate-600 active:bg-slate-200"
+            >+</button>
+          </div>
+
+          <button 
+            onClick={() => handleAction(mode === 'add' ? 'in' : 'out')}
+            disabled={!amount || parseInt(amount) <= 0}
+            className={`w-full py-4 rounded-xl font-bold text-white shadow-md text-lg flex items-center justify-center gap-2 transition-colors ${
+              mode === 'add' 
+                ? 'bg-green-600 hover:bg-green-700 disabled:bg-slate-300' 
+                : 'bg-red-600 hover:bg-red-700 disabled:bg-slate-300'
+            }`}
+          >
+            <Save size={20} /> KONFIRMASI
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ScannerView({ onDetected, onCancel }) {
+  const [isSimulating, setIsSimulating] = useState(true);
+
+  // In real implementation, use Html5QrcodeScanner
+  // For preview, we use robust simulation
+  const simulateScan = (code) => {
+    onDetected(code);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black z-50 flex flex-col">
+      <div className="relative flex-1 flex flex-col items-center justify-center">
+        
+        {/* Camera UI Overlay */}
+        <div className="absolute inset-0 m-8 rounded-3xl overflow-hidden border border-slate-700 flex items-center justify-center bg-slate-900">
+            <div className="text-center p-6">
+                <Camera className="mx-auto text-white mb-4 animate-pulse opacity-50" size={64} />
+                <p className="text-slate-400 text-xs mb-8">Arahkan kamera ke Barcode</p>
+
+                <div className="space-y-3 w-full max-w-[200px]">
                     <button 
-                      onClick={handleDownloadPDF}
-                      disabled={isGenerating || !isLibraryLoaded}
-                      type="button"
-                      className={`flex items-center gap-2 text-white px-6 py-3 rounded-lg font-bold shadow-lg transition-all active:scale-95 cursor-pointer ${isGenerating ? 'bg-gray-400 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700'}`}
+                        onClick={() => simulateScan("8992761136014")}
+                        className="w-full bg-slate-800 text-blue-400 border border-slate-700 p-3 rounded-lg text-xs font-bold hover:bg-slate-700"
                     >
-                      {isGenerating ? <LoadingIcon /> : <DownloadIcon />}
-                      {isGenerating ? 'Memproses...' : 'Download PDF'}
+                        [TEST] Indomie
+                    </button>
+                     <button 
+                        onClick={() => simulateScan("BRG-BARU-001")}
+                        className="w-full bg-slate-800 text-green-400 border border-slate-700 p-3 rounded-lg text-xs font-bold hover:bg-slate-700"
+                    >
+                        [TEST] Produk Baru
                     </button>
                 </div>
-              </div>
-
-              {/* View Container: Untuk menampilkan dokumen di tengah layar */}
-              <div id="sop-viewer-container">
-                  {/* A4 Document Wrapper: Gunakan class a4-page */}
-                  <div id="sop-document" className="a4-page">
-                    
-                    {/* Header */}
-                    <div className="text-center mb-8 border-b-4 border-black pb-4">
-                      <h1 className="text-2xl font-extrabold uppercase tracking-wider mb-2 text-black">
-                        Laporan Standarisasi Operasional Prosedur (SOP)
-                        <br />
-                        Pengemasan Produk
-                      </h1>
-                      <div className="flex justify-between items-end mt-2 text-sm font-bold text-gray-700 border-t border-gray-300 pt-2">
-                        <span>Divisi: Gudang & Logistik</span>
-                        <span>Tanggal: {new Date().toLocaleDateString('id-ID', { year: 'numeric', month: 'long', day: 'numeric' })}</span>
-                      </div>
-                    </div>
-
-                    {/* I. PENDAHULUAN */}
-                    <SectionWrapper>
-                        <SectionHeader title="I. Pendahuluan" />
-                        <p className="text-justify text-xs mb-4 leading-relaxed text-gray-800">
-                        Laporan ini bertujuan menetapkan standar tunggal dalam penggunaan material kemasan (<i>box, bubble wrap,</i> dan <i>bubble mailer</i>) untuk menjamin keamanan produk, efisiensi biaya, dan konsistensi paket yang diterima pelanggan. Standar ini mencakup aturan untuk produk reguler, penanganan khusus produk susu, produk blister, Heilung, serta pengecualian untuk produk berdimensi besar/product eksis/JLP.
-                        </p>
-                    </SectionWrapper>
-
-                    {/* II. SPESIFIKASI KODE BOX */}
-                    <SectionWrapper>
-                        <SectionHeader title="II. Spesifikasi Kode Box" />
-                        <p className="text-xs mb-2">Berikut adalah daftar kode box resmi yang wajib digunakan dalam operasional:</p>
-                        <table className="w-full border-collapse border border-black mb-4 shadow-sm">
-                        <thead>
-                            <tr>
-                            <TableHeader>KODE</TableHeader>
-                            <TableHeader>TIPE UKURAN</TableHeader>
-                            <TableHeader>DIMENSI (P x L x T)</TableHeader>
-                            <TableHeader>KETERANGAN</TableHeader>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr><TableCell><b>BOX</b></TableCell><TableCell>Kecil</TableCell><TableCell>7 x 7 x 17 cm</TableCell><TableCell align="left">Satuan Terkecil</TableCell></tr>
-                            <tr><TableCell><b>BPS-K</b></TableCell><TableCell>Sedang</TableCell><TableCell>7 x 14.5 x 20.5 cm</TableCell><TableCell align="left">Box Packing Sedang</TableCell></tr>
-                            <tr><TableCell><b>BPS-B</b></TableCell><TableCell>Besar</TableCell><TableCell>12.5 x 10 x 19.5 cm</TableCell><TableCell align="left">Box Packing Besar</TableCell></tr>
-                            <tr><TableCell><b>MAILER-K</b></TableCell><TableCell>Amplop Bubble Kecil</TableCell><TableCell>-</TableCell><TableCell align="left">Blister (1 Pcs) / Heilung (1-2 Pcs)</TableCell></tr>
-                            <tr><TableCell><b>MAILER-B</b></TableCell><TableCell>Amplop Bubble Besar</TableCell><TableCell>-</TableCell><TableCell align="left">Blister (2 Pcs) / Heilung (3 Pcs)</TableCell></tr>
-                        </tbody>
-                        </table>
-                        
-                        <p className="text-[10px] font-bold mb-2 uppercase tracking-wide text-gray-600">Lampiran Visual Fisik Box:</p>
-                        <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mb-4">
-                            <div className="bg-white p-1 rounded"><ImageUploader id="box1" label="Box Kecil" currentImage={images['box1']} onImageUpload={handleImageUpload} caption="Produk satuan/kecil."/></div>
-                            <div className="bg-white p-1 rounded"><ImageUploader id="box2" label="Box Sedang (BPS-K)" currentImage={images['box2']} onImageUpload={handleImageUpload} caption="Kapasitas 4-9 pcs reguler."/></div>
-                            <div className="bg-white p-1 rounded"><ImageUploader id="box3" label="Box Besar (BPS-B)" currentImage={images['box3']} onImageUpload={handleImageUpload} caption="Produk genap/banyak."/></div>
-                            <div className="bg-white p-1 rounded"><ImageUploader id="box4" label="Mailer Kecil" currentImage={images['box4']} onImageUpload={handleImageUpload} caption="Blister/Heilung (kecil)."/></div>
-                            <div className="bg-white p-1 rounded"><ImageUploader id="box5" label="Mailer Besar" currentImage={images['box5']} onImageUpload={handleImageUpload} caption="Heilung 3 pcs/lebar."/></div>
-                        </div>
-                    </SectionWrapper>
-
-                    {/* III. MARKING */}
-                    <SectionWrapper>
-                        <SectionHeader title="III. Standarisasi Penandaan Box (Marking)" />
-                        <div className="text-xs mb-4 bg-gray-50 p-3 rounded border border-gray-200">
-                            <p className="mb-2 font-semibold">Instruksi Penandaan:</p>
-                            <ul className="list-disc pl-5 space-y-1">
-                                <li><strong>Alat Tulis:</strong> Wajib menggunakan <strong>Spidol Permanen</strong> (hitam/biru tua) agar jelas & tahan air.</li>
-                                <li><strong>Lokasi:</strong> Ditulis pada sisi box yang rata dan terlihat jelas (hindari lipatan lakban).</li>
-                                <li><strong>Format:</strong> <code>[KODE/SINGKATAN] [ANGKA QTY]</code>.</li>
-                            </ul>
-                        </div>
-                        <ImageGrid 
-                            sectionId="marking" 
-                            count={2} 
-                            labels={["Posisi Marking", "Kejelasan Tulisan"]}
-                            captions={[
-                                "Tulis di area kosong sisi box yang rata. Jangan menimpa lakban segel.",
-                                "Gunakan huruf kapital yang tegas. Contoh: 'SUSU 2' atau 'SRM 5'."
-                            ]}
-                            images={images} 
-                            onUpload={handleImageUpload} 
-                        />
-                    </SectionWrapper>
-
-                    {/* IV. BUBBLE WRAP */}
-                    <SectionWrapper>
-                        <SectionHeader title="IV. Teknis Penggunaan Bubble Wrap (Konsolidasi)" />
-                        <div className="bg-red-50 border-l-4 border-red-500 p-2 mb-4">
-                            <p className="text-xs text-red-700">
-                                <strong>PENTING:</strong> Dilarang melakukan wrapping terpisah jika produk masuk ke dalam 1 box yang sama.
-                            </p>
-                        </div>
-
-                        <div className="grid grid-cols-3 gap-4 mb-4">
-                            <div className="flex flex-col h-full bg-white p-1 rounded">
-                                <ImageUploader id="bw_single" label="1. Single Product" currentImage={images['bw_single']} onImageUpload={handleImageUpload} caption="Single Product: Produk langsung dibalut 2 lapis BW." />
-                            </div>
-                            <div className="flex flex-col h-full bg-white p-1 rounded">
-                                <ImageUploader id="bw_stack" label="2. Stacking (Tumpuk)" currentImage={images['bw_stack']} onImageUpload={handleImageUpload} caption="Sejenis: Tumpuk vertikal agar presisi, lalu wrap jadi satu." />
-                            </div>
-                            <div className="flex flex-col h-full bg-white p-1 rounded">
-                                <ImageUploader id="bw_align" label="3. Alignment (Jajar)" currentImage={images['bw_align']} onImageUpload={handleImageUpload} caption="Beda Jenis: Susun berdampingan menyamakan sisi." />
-                            </div>
-                        </div>
-                    </SectionWrapper>
-
-                    {/* V. BLISTER */}
-                    <SectionWrapper>
-                        <SectionHeader title="V. Standarisasi: Produk XYZ Blister" />
-                        <p className="text-xs mb-2">
-                            <strong>Aturan Dasar:</strong> 1-2 Pcs wajib pakai Bubble Mailer. Di atas 2 Pcs gunakan Box.
-                        </p>
-                        <table className="w-full border-collapse border border-black mb-4 shadow-sm">
-                            <thead>
-                                <tr>
-                                    <TableHeader>QTY</TableHeader>
-                                    <TableHeader>KEMASAN</TableHeader>
-                                    <TableHeader>JML BOX</TableHeader>
-                                    <TableHeader>KODE</TableHeader>
-                                    <TableHeader>KETERANGAN</TableHeader>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <tr><TableCell>1 - 2</TableCell><TableCell>Mailer Kecil</TableCell><TableCell>1 Pcs</TableCell><TableCell>MAILER-K</TableCell><TableCell align="left">Lapis BW + Amplop</TableCell></tr>
-                                <tr><TableCell>3 - 6</TableCell><TableCell>Box Kecil</TableCell><TableCell>1 Box</TableCell><TableCell>BOX</TableCell><TableCell align="left">Disusun rapi</TableCell></tr>
-                                <tr><TableCell>7 - 18</TableCell><TableCell>Box Sedang</TableCell><TableCell>1 Box</TableCell><TableCell>BPS-K</TableCell><TableCell align="left">Disusun rapi</TableCell></tr>
-                                <tr><TableCell>&gt; 18</TableCell><TableCell>Box Besar</TableCell><TableCell>1 Box</TableCell><TableCell>BPS-B</TableCell><TableCell align="left">Sesuai dimensi</TableCell></tr>
-                            </tbody>
-                        </table>
-                        <ImageGrid 
-                            sectionId="blister" 
-                            count={4} 
-                            labels={["Blister Mailer", "Blister Box Kecil", "Blister Box Sedang", "Blister Box Besar"]}
-                            captions={[
-                                "Lapis bubble wrap dulu sebelum masuk amplop.",
-                                "Susun tegak di BOX kecil. Pastikan tidak goyang.",
-                                "Susun padat di BPS-K. Ganjal jika perlu.",
-                                "Gunakan BPS-B untuk jumlah banyak."
-                            ]}
-                            images={images} 
-                            onUpload={handleImageUpload} 
-                        />
-                    </SectionWrapper>
-
-                    {/* VI. REGULER */}
-                    <SectionWrapper>
-                        <SectionHeader title="VI. Standarisasi: Produk Reguler" />
-                        <div className="grid grid-cols-2 gap-6 mb-4">
-                            <div>
-                                <h3 className="font-bold text-xs mb-2 bg-gray-200 p-1.5 text-center border border-gray-400 rounded">A. Produk Sejenis</h3>
-                                <table className="w-full border-collapse border border-black shadow-sm">
-                                    <thead><tr><TableHeader>Qty</TableHeader><TableHeader>Jml Box</TableHeader><TableHeader>Kode</TableHeader></tr></thead>
-                                    <tbody>
-                                        <tr><TableCell>1 - 3</TableCell><TableCell>1 Box</TableCell><TableCell>BOX</TableCell></tr>
-                                        <tr><TableCell>4 - 9</TableCell><TableCell>1 Box</TableCell><TableCell>BPS-K</TableCell></tr>
-                                        <tr><TableCell>&gt; 9</TableCell><TableCell>1/2 Box</TableCell><TableCell>BPS-B</TableCell></tr>
-                                    </tbody>
-                                </table>
-                            </div>
-                            <div>
-                                <h3 className="font-bold text-xs mb-2 bg-gray-200 p-1.5 text-center border border-gray-400 rounded">B. Produk Beda Jenis</h3>
-                                <table className="w-full border-collapse border border-black shadow-sm">
-                                    <thead><tr><TableHeader>Qty</TableHeader><TableHeader>Jml Box</TableHeader><TableHeader>Kode</TableHeader></tr></thead>
-                                    <tbody>
-                                        <tr><TableCell>1 - 2</TableCell><TableCell>1 Box</TableCell><TableCell>BOX</TableCell></tr>
-                                        <tr><TableCell>&gt; 2</TableCell><TableCell>1 Box</TableCell><TableCell>BPS-K</TableCell></tr>
-                                        <tr><TableCell>&gt; 9</TableCell><TableCell>1/2 Box</TableCell><TableCell>BPS-B</TableCell></tr>
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-                        <ImageGrid 
-                            sectionId="reguler" 
-                            count={3} 
-                            labels={["Reguler Kecil (BOX)", "Reguler Sedang (BPS-K)", "Reguler Besar (BPS-B)"]}
-                            captions={[
-                                "Packing minimalis tanpa rongga berlebih.",
-                                "Susun padat produk sejenis/beda jenis.",
-                                "Untuk paket bulk/campuran volume besar."
-                            ]} 
-                            images={images} 
-                            onUpload={handleImageUpload} 
-                        />
-                    </SectionWrapper>
-
-                    {/* VII. SUSU */}
-                    <SectionWrapper>
-                        <SectionHeader title="VII. Standarisasi: Khusus Produk Susu" />
-                        <div className="text-xs mb-3 border-l-4 border-blue-500 bg-blue-50 p-2 rounded">
-                            <p className="font-bold mb-1">Aturan Ganjil/Genap:</p>
-                            <ul className="list-disc pl-4 space-y-0.5">
-                                <li><strong>Qty Ganjil (1, 3, 5):</strong> Gunakan Box Sedang (BPS-K) per pcs.</li>
-                                <li><strong>Qty Genap (2, 4, 6):</strong> Gunakan Box Besar (BPS-B) per 2 pcs.</li>
-                            </ul>
-                        </div>
-                        <table className="w-full border-collapse border border-black mb-4 shadow-sm">
-                            <thead>
-                                <tr>
-                                    <TableHeader>QTY</TableHeader>
-                                    <TableHeader>POLA</TableHeader>
-                                    <TableHeader>JML BOX</TableHeader>
-                                    <TableHeader>KODE BOX</TableHeader>
-                                    <TableHeader>TEKNIS</TableHeader>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <tr><TableCell>1</TableCell><TableCell>Ganjil</TableCell><TableCell>1 Box</TableCell><TableCell>BPS-K</TableCell><TableCell align="left">Satuan</TableCell></tr>
-                                <tr><TableCell>2</TableCell><TableCell>Genap</TableCell><TableCell>1 Box</TableCell><TableCell>BPS-B</TableCell><TableCell align="left">Gabung isi 2</TableCell></tr>
-                                <tr><TableCell>3</TableCell><TableCell>Ganjil</TableCell><TableCell>3 Box</TableCell><TableCell>3x BPS-K</TableCell><TableCell align="left">3 box + BW Luar</TableCell></tr>
-                                <tr><TableCell>4</TableCell><TableCell>Genap</TableCell><TableCell>2 Box</TableCell><TableCell>2x BPS-B</TableCell><TableCell align="left">2 box + BW Luar</TableCell></tr>
-                            </tbody>
-                        </table>
-                        <ImageGrid 
-                            sectionId="susu" 
-                            count={3} 
-                            labels={["Susu Ganjil (BPS-K)", "Susu Genap (BPS-B)", "Susu Multipack (Wrap)"]} 
-                            captions={[
-                                "Satu pcs susu masuk presisi ke BPS-K.",
-                                "Dua pcs susu masuk ke BPS-B.",
-                                "Contoh gabungan 3 box yang di-wrap luar jadi satu."
-                            ]}
-                            images={images} 
-                            onUpload={handleImageUpload} 
-                        />
-                    </SectionWrapper>
-
-                    {/* VIII. DIMENSI BESAR / PRODUCT EKSIS */}
-                    <SectionWrapper>
-                        <SectionHeader title="VIII. Pengecualian: Product Eksis" />
-                        <p className="text-xs mb-2">Khusus kategori Product Eksis (Foam/Kapsul Besar, Product JLP).</p>
-                        <table className="w-full border-collapse border border-black mb-4 shadow-sm">
-                            <thead>
-                                <tr>
-                                    <TableHeader>QTY</TableHeader>
-                                    <TableHeader>JML BOX</TableHeader>
-                                    <TableHeader>KODE</TableHeader>
-                                    <TableHeader>KETERANGAN</TableHeader>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <tr><TableCell>1</TableCell><TableCell>1 Box</TableCell><TableCell>BOX / BPS-K</TableCell><TableCell align="left">Pakai BOX jika muat, jika tidak naik ke BPS-K.</TableCell></tr>
-                                <tr><TableCell>2 - 3</TableCell><TableCell>1 Box</TableCell><TableCell>BPS-K</TableCell><TableCell align="left">Wajib BPS-K karena volume.</TableCell></tr>
-                                <tr><TableCell>4 - 6</TableCell><TableCell>2 Box</TableCell><TableCell>2x BPS-K</TableCell><TableCell align="left">Dibagi 2 Box.</TableCell></tr>
-                            </tbody>
-                        </table>
-                        <ImageGrid 
-                            sectionId="big" 
-                            count={4} 
-                            labels={["Product Eksis (Satuan)", "Product Eksis (2-3)", "Product Eksis (Multipack)", "Product JLP"]}
-                            captions={[
-                                "Cek muat/tidaknya di Box kecil sebelum ke BPS-K.",
-                                "Wajib BPS-K agar produk tidak tertekan.",
-                                "Jika lebih dari 4, pisah jadi 2 paket (2x BPS-K).",
-                                "Contoh packing khusus product JLP."
-                            ]}
-                            images={images} 
-                            onUpload={handleImageUpload} 
-                        />
-                    </SectionWrapper>
-
-                    {/* IX. KHUSUS PRODUCT HEILUNG 10 ML */}
-                    <SectionWrapper>
-                        <SectionHeader title="IX. Standarisasi: Product Heilung 10ml" />
-                        <p className="text-xs mb-2">
-                            <strong>Aturan Khusus:</strong> Menggunakan kombinasi Mailer Kecil dan Besar sesuai Qty.
-                        </p>
-                        <table className="w-full border-collapse border border-black mb-4 shadow-sm">
-                            <thead>
-                                <tr>
-                                    <TableHeader>QTY</TableHeader>
-                                    <TableHeader>KEMASAN</TableHeader>
-                                    <TableHeader>JML BOX/MAILER</TableHeader>
-                                    <TableHeader>KODE</TableHeader>
-                                    <TableHeader>KETERANGAN</TableHeader>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <tr><TableCell>1 - 2</TableCell><TableCell>Mailer Kecil</TableCell><TableCell>1 Pcs</TableCell><TableCell>MAILER-K</TableCell><TableCell align="left">Wajib lapis Bubble Wrap.</TableCell></tr>
-                                <tr><TableCell>3</TableCell><TableCell>Mailer Besar</TableCell><TableCell>1 Pcs</TableCell><TableCell>MAILER-B</TableCell><TableCell align="left">Wajib lapis Bubble Wrap.</TableCell></tr>
-                                <tr><TableCell>4 - 6</TableCell><TableCell>Box Sedang</TableCell><TableCell>1 Box</TableCell><TableCell>BPS-K</TableCell><TableCell align="left">Gunakan BPS-K sesuai muatan.</TableCell></tr>
-                                <tr><TableCell>&gt; 6</TableCell><TableCell>Box Besar</TableCell><TableCell>1 Box</TableCell><TableCell>BPS-B</TableCell><TableCell align="left">Gunakan BPS-B untuk Qty banyak.</TableCell></tr>
-                            </tbody>
-                        </table>
-                        <ImageGrid 
-                            sectionId="heilung" 
-                            count={3} 
-                            labels={["Heilung (Mailer Kecil)", "Heilung (Mailer Besar)", "Heilung Box"]}
-                            captions={[
-                                "Isi 1-2 pcs masuk ke Mailer Kecil.",
-                                "Isi 3 pcs masuk ke Mailer Besar.",
-                                "Isi > 3 pcs wajib menggunakan Box."
-                            ]}
-                            images={images} 
-                            onUpload={handleImageUpload} 
-                        />
-                    </SectionWrapper>
-
-                    {/* Footer */}
-                    <div className="mt-12 pt-4 border-t-2 border-gray-400 flex justify-between text-[10px] text-gray-500 italic">
-                        <span>Dokumen Standarisasi Pengemasan - Gudang & Logistik</span>
-                        <span>Halaman Otomatis</span>
-                    </div>
-
-                  </div>
-              </div>
             </div>
-          );
-        }
+            
+            {/* Scan Line Animation */}
+            <div className="absolute left-0 right-0 h-0.5 bg-red-500 shadow-[0_0_15px_rgba(239,68,68,1)] animate-[scan_2s_ease-in-out_infinite] top-1/2"></div>
+        </div>
 
-        const root = ReactDOM.createRoot(document.getElementById('root'));
-        root.render(<SOPGenerator />);
-    </script>
-</body>
-</html>
+        <button 
+            onClick={onCancel}
+            className="absolute top-12 right-6 text-white bg-black/40 p-2 rounded-full backdrop-blur-md"
+        >
+            <X size={24} />
+        </button>
+      </div>
+
+      <div className="bg-black text-white p-8 pb-12 text-center">
+        <p className="text-sm font-medium opacity-80">
+          Pastikan cahaya cukup terang
+        </p>
+      </div>
+
+      <style>{`
+        @keyframes scan {
+          0%, 100% { transform: translateY(-120px); opacity: 0; }
+          50% { opacity: 1; }
+          100% { transform: translateY(120px); opacity: 0; }
+        }
+      `}</style>
+    </div>
+  );
+}
