@@ -15,6 +15,9 @@
     <!-- 3. BABEL (Agar browser bisa baca kode JSX/React) -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
+    <!-- 4. HTML5-QRCODE (LIBRARY KAMERA SCANNER) -->
+    <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+
     <style>
         /* Custom styles untuk scrollbar halus */
         .scrollbar-hide::-webkit-scrollbar {
@@ -27,6 +30,16 @@
         body {
             -webkit-tap-highlight-color: transparent;
         }
+        /* Style khusus untuk Scanner agar pas di layar HP */
+        #reader {
+            width: 100%;
+            background: black;
+            border: none !important;
+        }
+        #reader video {
+            object-fit: cover;
+            border-radius: 12px;
+        }
     </style>
 </head>
 <body class="bg-slate-100 text-slate-800">
@@ -37,7 +50,7 @@
     <!-- SCRIPT UTAMA APLIKASI -->
     <script type="text/babel">
         // --- 1. SETUP LIBRARY ---
-        const { useState, useEffect, useMemo } = React;
+        const { useState, useEffect, useMemo, useRef } = React;
         
         // --- 2. DEFINISI IKON (Hardcoded agar anti-error CDN) ---
         // Helper untuk membuat ikon SVG
@@ -119,6 +132,32 @@
             const [errorMsg, setErrorMsg] = useState('');
             const [isDemoMode, setIsDemoMode] = useState(false);
 
+            // --- HANDLING TOMBOL BACK HP (ANDROID) ---
+            useEffect(() => {
+                const handlePopState = (event) => {
+                    // Jika user menekan tombol back dan kita tidak di home
+                    if (view !== 'home') {
+                        // Mencegah browser keluar/mundur ke halaman sebelumnya
+                        // Kita paksa tetap di halaman ini tapi ubah state view
+                        event.preventDefault(); 
+                        setView('home');
+                    }
+                };
+
+                // Jika kita berpindah ke view selain home, tambahkan state history baru
+                // Ini membuat tombol back memiliki "sesuatu" untuk di-undo
+                if (view !== 'home') {
+                    window.history.pushState({ view: view }, document.title);
+                }
+
+                window.addEventListener('popstate', handlePopState);
+
+                return () => {
+                    window.removeEventListener('popstate', handlePopState);
+                };
+            }, [view]);
+
+
             // --- FETCH DATA ---
             const fetchData = async () => {
                 setLoading(true);
@@ -168,12 +207,13 @@
 
             // --- ACTIONS ---
             const handleScanSuccess = (code) => {
-                setScannedCode(code);
-                const existingProduct = inventory[code];
+                const normalizedCode = code.toUpperCase(); // Pastikan kode selalu uppercase dari Scan/Input
+                setScannedCode(normalizedCode);
+                const existingProduct = inventory[normalizedCode];
                 if (existingProduct) {
                     setCurrentProduct({ ...existingProduct, isNew: false });
                 } else {
-                    setCurrentProduct({ id: code, name: '', stock: 0, isNew: true });
+                    setCurrentProduct({ id: normalizedCode, name: '', stock: 0, isNew: true });
                 }
                 setView('product');
             };
@@ -512,7 +552,14 @@
                     <div className="bg-white p-2 rounded-xl shadow-sm border border-slate-200 flex gap-2">
                         <div className="relative flex-1">
                             <Search className="absolute left-3 top-2.5 text-slate-400" size={18} />
-                            <input type="text" placeholder="Cari ID atau Nama..." className="w-full pl-9 pr-4 py-2 bg-transparent text-sm focus:outline-none" value={scannedCode} onChange={(e) => setScannedCode(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && onSearch(e.target.value)} />
+                            <input 
+                                type="text" 
+                                placeholder="Cari ID atau Nama..." 
+                                className="w-full pl-9 pr-4 py-2 bg-transparent text-sm focus:outline-none uppercase" 
+                                value={scannedCode} 
+                                onChange={(e) => setScannedCode(e.target.value.toUpperCase())} 
+                                onKeyDown={(e) => e.key === 'Enter' && onSearch(e.target.value)} 
+                            />
                         </div>
                         <button onClick={() => onSearch(scannedCode)} className="bg-slate-100 text-slate-600 px-4 py-2 rounded-lg font-bold text-xs hover:bg-slate-200">Cari</button>
                     </div>
@@ -590,19 +637,55 @@
             );
         }
 
+        // --- SCANNER ASLI (BUKAN SIMULASI) ---
         function ScannerView({ onDetected, onCancel }) {
-            const simulateScan = (code) => onDetected(code);
+            useEffect(() => {
+                // Inisialisasi Scanner
+                const scanner = new Html5QrcodeScanner(
+                    "reader",
+                    { 
+                        fps: 10, 
+                        qrbox: { width: 250, height: 250 },
+                        aspectRatio: 1.0
+                    },
+                    /* verbose= */ false
+                );
+                
+                scanner.render((decodedText) => {
+                    // Saat berhasil scan
+                    scanner.clear();
+                    onDetected(decodedText);
+                }, (error) => {
+                    // Saat scanning (frame by frame error) - abaikan agar console tidak penuh
+                });
+
+                // Cleanup saat komponen ditutup
+                return () => {
+                    try {
+                        scanner.clear().catch(e => console.error("Scanner clear error", e));
+                    } catch(e) { 
+                        // ignore 
+                    }
+                };
+            }, []);
+
             return (
-                <div className="fixed inset-0 bg-black z-50 flex flex-col">
-                    <div className="relative flex-1 flex flex-col items-center justify-center">
-                        <div className="absolute inset-0 m-8 rounded-3xl overflow-hidden border border-slate-700 flex items-center justify-center bg-slate-900">
-                            <div className="text-center p-6"><Camera className="mx-auto text-white mb-4 animate-pulse opacity-50" size={64} /><p className="text-slate-400 text-xs mb-8">Arahkan kamera ke Barcode</p><div className="space-y-3 w-full max-w-[200px]"><button onClick={() => simulateScan("8992761136014")} className="w-full bg-slate-800 text-blue-400 border border-slate-700 p-3 rounded-lg text-xs font-bold hover:bg-slate-700">[SIMULASI] Indomie</button><button onClick={() => simulateScan("BRG-BARU-001")} className="w-full bg-slate-800 text-green-400 border border-slate-700 p-3 rounded-lg text-xs font-bold hover:bg-slate-700">[SIMULASI] Produk Baru</button></div></div>
-                            <div className="absolute left-0 right-0 h-0.5 bg-red-500 shadow-[0_0_15px_rgba(239,68,68,1)] animate-[scan_2s_ease-in-out_infinite] top-1/2"></div>
+                <div className="fixed inset-0 bg-black z-50 flex flex-col justify-center items-center">
+                    <div className="w-full max-w-md px-4 relative">
+                        <div className="bg-white/10 p-4 rounded-2xl backdrop-blur-sm border border-white/20">
+                             <div id="reader" className="overflow-hidden rounded-xl bg-black"></div>
                         </div>
-                        <button onClick={onCancel} className="absolute top-12 right-6 text-white bg-black/40 p-2 rounded-full backdrop-blur-md"><X size={24} /></button>
+                        <p className="text-white text-center mt-4 text-sm font-medium opacity-80 animate-pulse">
+                            Arahkan kamera ke Barcode Produk
+                        </p>
                     </div>
-                    <div className="bg-black text-white p-8 pb-12 text-center"><p className="text-sm font-medium opacity-80">Pastikan cahaya cukup terang</p></div>
-                     <style>{`@keyframes scan { 0%, 100% { transform: translateY(-120px); opacity: 0; } 50% { opacity: 1; } 100% { transform: translateY(120px); opacity: 0; } }`}</style>
+
+                    <button 
+                        onClick={onCancel}
+                        className="absolute bottom-10 left-1/2 -translate-x-1/2 bg-white text-slate-900 px-6 py-3 rounded-full font-bold shadow-lg active:scale-95 transition-transform flex items-center gap-2"
+                    >
+                        <X size={20} /> BATAL
+                    </button>
                 </div>
             );
         }
