@@ -1,699 +1,857 @@
 <!DOCTYPE html>
 <html lang="id">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Stok Pintar - Google Sheet</title>
-    
-    <!-- 1. TAILWIND CSS (Styling) -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    
-    <!-- 2. REACT & REACT DOM (Core Framework) -->
-    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-    
-    <!-- 3. BABEL (Agar browser bisa baca kode JSX/React) -->
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-
-    <!-- 4. HTML5-QRCODE (LIBRARY KAMERA SCANNER) -->
-    <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
-
-    <style>
-        /* Custom styles untuk scrollbar halus */
-        .scrollbar-hide::-webkit-scrollbar {
-            display: none;
-        }
-        .scrollbar-hide {
-            -ms-overflow-style: none;
-            scrollbar-width: none;
-        }
-        body {
-            -webkit-tap-highlight-color: transparent;
-        }
-        /* Style khusus untuk Scanner agar pas di layar HP */
-        #reader {
-            width: 100%;
-            background: black;
-            border: none !important;
-        }
-        #reader video {
-            object-fit: cover;
-            border-radius: 12px;
-        }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Stok Pintar - Inventory System</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  
+  <!-- LIBRARY SCANNER BARCODE ASLI -->
+  <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+  
+  <!-- LIBRARY ICON -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  
+  <style>
+    /* Custom Scrollbar hide */
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    /* Animasi Scanner */
+    .scan-region-highlight { border-radius: 20px !important; border: 4px solid #3b82f6 !important; }
+  </style>
 </head>
-<body class="bg-slate-100 text-slate-800">
+<body class="bg-slate-100 touch-manipulation">
+  <div id="root"></div>
 
-    <!-- Container Aplikasi -->
-    <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useMemo, useRef } = React;
 
-    <!-- SCRIPT UTAMA APLIKASI -->
-    <script type="text/babel">
-        // --- 1. SETUP LIBRARY ---
-        const { useState, useEffect, useMemo, useRef } = React;
-        
-        // --- 2. DEFINISI IKON (Hardcoded agar anti-error CDN) ---
-        // Helper untuk membuat ikon SVG
-        const IconBase = ({ children, size = 24, className = "", ...props }) => (
-            <svg 
-                xmlns="http://www.w3.org/2000/svg" 
-                width={size} 
-                height={size} 
-                viewBox="0 0 24 24" 
-                fill="none" 
-                stroke="currentColor" 
-                strokeWidth="2" 
-                strokeLinecap="round" 
-                strokeLinejoin="round" 
-                className={className}
-                {...props}
-            >
-                {children}
-            </svg>
+    // --- UTILS: NORMALISASI FORMAT TANGGAL ---
+    // Fungsi ini penting agar "1/2029", "01/2029", dan "01/2029 " dianggap sama
+    const normalizeExpiry = (dateStr) => {
+        if (!dateStr || dateStr === '-') return '-';
+        // Hapus spasi
+        let clean = String(dateStr).trim();
+        // Jika format MM/YYYY, pastikan MM dua digit
+        if (clean.includes('/')) {
+            const parts = clean.split('/');
+            if (parts.length === 2) {
+                const m = parts[0].padStart(2, '0');
+                const y = parts[1];
+                return `${m}/${y}`;
+            }
+        }
+        return clean;
+    };
+
+    // --- CONVERTER LUCIDE ICON KE REACT ---
+    const lucideReact = Object.keys(lucide.icons).reduce((acc, iconName) => {
+      acc[iconName] = ({ color = "currentColor", size = 24, className, strokeWidth = 2, ...props }) => {
+        return React.createElement(
+          'svg',
+          {
+            xmlns: "http://www.w3.org/2000/svg",
+            width: size,
+            height: size,
+            viewBox: "0 0 24 24",
+            fill: "none",
+            stroke: color,
+            strokeWidth: strokeWidth,
+            strokeLinecap: "round",
+            strokeLinejoin: "round",
+            className: className,
+            ...props
+          },
+          ...lucide.icons[iconName].map((child, index) => {
+             const [tag, attrs] = child;
+             return React.createElement(tag, { ...attrs, key: index });
+          })
         );
+      };
+      return acc;
+    }, {});
 
-        // Definisi Ikon-ikon yang digunakan
-        const Scan = (props) => <IconBase {...props}><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/></IconBase>;
-        const Package = (props) => <IconBase {...props}><path d="m16.5 9.4-9-5.19"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" x2="12" y1="22.08" y2="12"/></IconBase>;
-        const Plus = (props) => <IconBase {...props}><path d="M5 12h14"/><path d="M12 5v14"/></IconBase>;
-        const Minus = (props) => <IconBase {...props}><path d="M5 12h14"/></IconBase>;
-        const Save = (props) => <IconBase {...props}><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></IconBase>;
-        const History = (props) => <IconBase {...props}><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></IconBase>;
-        const Search = (props) => <IconBase {...props}><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></IconBase>;
-        const ArrowLeft = (props) => <IconBase {...props}><path d="m12 19-7-7 7-7"/><path d="M19 12H5"/></IconBase>;
-        const X = (props) => <IconBase {...props}><path d="M18 6 6 18"/><path d="m6 6 12 12"/></IconBase>;
-        const Camera = (props) => <IconBase {...props}><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></IconBase>;
-        const PlusCircle = (props) => <IconBase {...props}><circle cx="12" cy="12" r="10"/><path d="M8 12h8"/><path d="M12 8v8"/></IconBase>;
-        const PenTool = (props) => <IconBase {...props}><path d="m12 19 7-7 3 3-7 7-3-3z"/><path d="m18 13-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="m2 2 7.586 7.586"/><circle cx="11" cy="11" r="2"/></IconBase>;
-        const Clock = (props) => <IconBase {...props}><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></IconBase>;
-        const ArrowUpRight = (props) => <IconBase {...props}><path d="M7 7h10v10"/><path d="M7 17 17 7"/></IconBase>;
-        const ArrowDownLeft = (props) => <IconBase {...props}><path d="M17 17H7V7"/><path d="M17 7 7 17"/></IconBase>;
-        const Settings = (props) => <IconBase {...props}><path d="M12.22 2h-.44a2 2 0 0 1-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.47a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></IconBase>;
-        const CheckCircle = (props) => <IconBase {...props}><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></IconBase>;
-        const Store = (props) => <IconBase {...props}><path d="m2 7 4.41-4.41A2 2 0 0 1 7.83 2h8.34a2 2 0 0 1 1.42.59L22 7"/><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><path d="M15 22v-4a2 2 0 0 0-2-2h-2a2 2 0 0 0-2 2v4"/><path d="M2 7h20"/><path d="M22 7v3a2 2 0 0 1-2 2v0a2.7 2.7 0 0 1-1.59-.63.7.7 0 0 0-.82 0A2.7 2.7 0 0 1 16 12a2.7 2.7 0 0 1-1.59-.63.7.7 0 0 0-.82 0A2.7 2.7 0 0 1 12 12a2.7 2.7 0 0 1-1.59-.63.7.7 0 0 0-.82 0A2.7 2.7 0 0 1 8 12a2.7 2.7 0 0 1-1.59-.63.7.7 0 0 0-.82 0A2.7 2.7 0 0 1 4 12v0a2 2 0 0 1-2-2V7"/></IconBase>;
-        const Calendar = (props) => <IconBase {...props}><rect width="18" height="18" x="3" y="4" rx="2" ry="2"/><line x1="16" x2="16" y1="2" y2="6"/><line x1="8" x2="8" y1="2" y2="6"/><line x1="3" x2="21" y1="10" y2="10"/></IconBase>;
-        const Filter = (props) => <IconBase {...props}><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></IconBase>;
-        const Smartphone = (props) => <IconBase {...props}><rect width="14" height="20" x="5" y="2" rx="2" ry="2"/><path d="M12 18h.01"/></IconBase>;
-        const Wifi = (props) => <IconBase {...props}><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" x2="12.01" y1="20" y2="20"/></IconBase>;
-        const RefreshCw = (props) => <IconBase {...props}><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></IconBase>;
-        const AlertCircle = (props) => <IconBase {...props}><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></IconBase>;
-        const Loader2 = (props) => <IconBase {...props}><path d="M21 12a9 9 0 1 1-6.219-17.202"/></IconBase>;
-        const Database = (props) => <IconBase {...props}><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></IconBase>;
+    const { 
+      Scan, Package, Plus, Minus, Save, History, Search, ArrowLeft, X,
+      Camera, PlusCircle, PenTool, Clock, ArrowUpRight, ArrowDownLeft,
+      Settings, CheckCircle, Store, Calendar, Filter, Smartphone, Wifi,
+      RefreshCw, AlertCircle, Loader2, Database, AlertTriangle, Edit3, ChevronDown
+    } = lucideReact;
 
+    /* --- KONFIGURASI UTAMA --- */
+    // GANTI URL INI DENGAN DEPLOYMENT TERBARU ANDA
+    const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxQrGCb1G-MDSTtlal365bRQRnxDoXMcXlgmkO7dc-_PyMnHy-y6qeRywsbTsmazgUm/exec";
+    const STORE_CODE = "GUDANG UTAMA";
 
-        // --- 3. KONFIGURASI ---
-        // GANTI URL INI DENGAN URL WEB APP GOOGLE SCRIPT ANDA
-        const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxQrGCb1G-MDSTtlal365bRQRnxDoXMcXlgmkO7dc-_PyMnHy-y6qeRywsbTsmazgUm/exec";
-        const STORE_CODE = "GRADE C";
+    /* --- DATA DEMO --- */
+    const DEMO_INVENTORY = {
+      "8992761136014": { id: "8992761136014", name: "Indomie Goreng", stock: 50, expiryDate: "12/2025", updatedAt: new Date().toISOString() },
+    };
+    const DEMO_LOGS = [];
 
-        // --- 4. DATA DEMO (FALLBACK) ---
-        const DEMO_INVENTORY = {
-            "8992761136014": { id: "8992761136014", name: "Indomie Goreng", stock: 50, updatedAt: new Date().toISOString() },
-            "BRG-001": { id: "BRG-001", name: "Kopi Sachet", stock: 10, updatedAt: new Date().toISOString() },
-            "BRG-002": { id: "BRG-002", name: "Air Mineral 600ml", stock: 24, updatedAt: new Date().toISOString() }
+    function App() {
+      const [view, setView] = useState('home');
+      const [inventory, setInventory] = useState({});
+      const [logs, setLogs] = useState([]);
+      const [currentProduct, setCurrentProduct] = useState(null);
+      const [scannedCode, setScannedCode] = useState('');
+      
+      const [loading, setLoading] = useState(true);
+      const [processing, setProcessing] = useState(false);
+      const [errorMsg, setErrorMsg] = useState('');
+      const [isDemoMode, setIsDemoMode] = useState(false);
+
+      // --- FETCH DATA ---
+      const fetchData = async () => {
+        setLoading(true);
+        setErrorMsg('');
+        setIsDemoMode(false);
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 10000); 
+
+          const response = await fetch(`${GOOGLE_SCRIPT_URL}?action=read&store=${encodeURIComponent(STORE_CODE)}`, { signal: controller.signal });
+          clearTimeout(timeoutId);
+
+          if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
+          const data = await response.json();
+          if (data.status === 'error') throw new Error(data.message);
+
+          const invMap = {};
+          if (data.inventory) {
+            data.inventory.forEach(item => { invMap[item.id] = item; });
+          }
+
+          setInventory(invMap);
+          setLogs(data.logs || []);
+          setLoading(false);
+
+        } catch (err) {
+          console.warn("Offline Mode:", err);
+          setInventory(DEMO_INVENTORY);
+          setLogs(DEMO_LOGS);
+          setIsDemoMode(true);
+          setErrorMsg("Mode Offline / Demo");
+          setLoading(false);
+        }
+      };
+
+      useEffect(() => { fetchData(); }, []);
+
+      // --- LOGIC UTAMA ---
+      const handleScanSuccess = (code) => {
+        setScannedCode(code);
+        const existingProduct = inventory[code];
+        if (existingProduct) {
+          setCurrentProduct({ ...existingProduct, isNew: false, isManualInput: false });
+        } else {
+          setCurrentProduct({ id: code, name: '', stock: 0, isNew: true, isManualInput: false, expiryDate: '' });
+        }
+        setView('product');
+      };
+
+      const handleManualAdd = () => {
+         setCurrentProduct({ id: '', name: '', stock: 0, isNew: true, isManualInput: true, expiryDate: '' });
+         setView('product');
+      };
+
+      const saveProductTransaction = async (finalId, amount, type, expiryDate, finalName) => {
+        setProcessing(true);
+
+        const numAmount = parseInt(amount);
+        const normExpiry = normalizeExpiry(expiryDate);
+        
+        const payload = {
+          action: 'transaction',
+          store: STORE_CODE,
+          id: finalId,
+          name: finalName,
+          amount: numAmount,
+          type: type,
+          expiryDate: normExpiry,
+          timestamp: new Date().toISOString()
         };
 
-        const DEMO_LOGS = [
-            { timestamp: new Date().toISOString(), productName: "Indomie Goreng", type: "new", amount: 50, id: "log-1" },
-            { timestamp: new Date(Date.now() - 86400000).toISOString(), productName: "Kopi Sachet", type: "out", amount: 2, id: "log-2" }
-        ];
+        try {
+          await fetch(GOOGLE_SCRIPT_URL, {
+            method: 'POST',
+            mode: 'no-cors', 
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
 
-        // --- 5. KOMPONEN UTAMA ---
-        function App() {
-            const [view, setView] = useState('home');
-            const [inventory, setInventory] = useState({});
-            const [logs, setLogs] = useState([]);
-            const [currentProduct, setCurrentProduct] = useState(null);
-            const [scannedCode, setScannedCode] = useState('');
+          // Optimistic Update
+          const newInventory = { ...inventory };
+          const oldStock = (newInventory[finalId] && newInventory[finalId].stock) ? newInventory[finalId].stock : 0;
+          
+          let finalStock = oldStock;
+          if (type === 'new') finalStock = numAmount;
+          else if (type === 'in') finalStock += numAmount;
+          else if (type === 'out') finalStock -= numAmount;
+
+          newInventory[finalId] = {
+            id: finalId,
+            name: finalName,
+            stock: finalStock,
+            expiryDate: normExpiry, // Update dengan format normal
+            updatedAt: new Date().toISOString()
+          };
+
+          setInventory(newInventory);
+          
+          const newLog = {
+            id: `local-${Date.now()}`,
+            productId: finalId,
+            productName: finalName,
+            type: type,
+            amount: numAmount,
+            expiryDate: normExpiry,
+            timestamp: new Date().toISOString() 
+          };
+          setLogs(prevLogs => [newLog, ...prevLogs]);
+
+          setProcessing(false);
+          setView('home');
+          setScannedCode('');
+          setCurrentProduct(null);
+          
+          if (isDemoMode) alert("Data disimpan lokal (Demo).");
+
+        } catch (error) {
+          console.error("Save Error:", error);
+          alert("Gagal menyimpan data.");
+          setProcessing(false);
+        }
+      };
+
+      // --- RENDER UTAMA ---
+      if (loading && !Object.keys(inventory).length) {
+        return (
+          <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center text-slate-500 font-sans">
+            <Loader2 className="animate-spin h-10 w-10 text-blue-600 mb-4" />
+            <p>Memuat Sistem...</p>
+          </div>
+        );
+      }
+
+      return (
+        <div className="min-h-screen bg-slate-100 font-sans text-slate-800 max-w-md mx-auto shadow-2xl overflow-hidden relative flex flex-col">
+          
+          {/* HEADER */}
+          <header className={`${isDemoMode ? 'bg-orange-600' : 'bg-blue-600'} text-white p-4 shadow-md sticky top-0 z-20`}>
+            <div className="flex justify-between items-center">
+              <div className="flex flex-col">
+                <h1 className="text-lg font-bold flex items-center gap-2">
+                  <Package size={20} /> Stok Pintar
+                </h1>
+                <span className="text-[10px] opacity-90 font-mono flex items-center gap-1 bg-black/20 px-2 py-0.5 rounded-full w-fit mt-1 border border-white/20">
+                  <Store size={10} /> {STORE_CODE} {isDemoMode ? '(OFFLINE)' : '(ONLINE)'}
+                </span>
+              </div>
+              <div className="flex items-center gap-3">
+                <button onClick={fetchData} disabled={loading} className={`p-2 rounded-full hover:bg-white/20 ${loading ? 'animate-spin' : ''}`}>
+                  <RefreshCw size={18} />
+                </button>
+                {view !== 'home' && (
+                  <button onClick={() => setView('home')} className="text-blue-100 hover:text-white">
+                    <X size={24} />
+                  </button>
+                )}
+              </div>
+            </div>
+          </header>
+
+          {processing && (
+            <div className="absolute inset-0 z-50 bg-black/50 backdrop-blur-sm flex flex-col items-center justify-center text-white">
+              <Loader2 className="animate-spin h-12 w-12 mb-2" />
+              <p className="font-bold">Menyimpan Data...</p>
+            </div>
+          )}
+
+          {errorMsg && (
+            <div className="bg-orange-50 text-orange-700 px-4 py-3 text-xs flex items-start gap-2 border-b border-orange-100">
+              <AlertCircle size={16} className="shrink-0 mt-0.5" />
+              <div>
+                <p className="font-bold mb-1">Mode Offline</p>
+                <p>Data yang ditampilkan adalah data lokal/cache.</p>
+              </div>
+            </div>
+          )}
+
+          <main className="flex-1 overflow-y-auto p-4 pb-24 bg-slate-50 scroll-smooth">
+            {view === 'home' && (
+              <HomeView 
+                inventory={inventory} 
+                onSearch={(code) => code && handleScanSuccess(code)}
+                scannedCode={scannedCode}
+                setScannedCode={setScannedCode}
+                onItemClick={(item) => { setCurrentProduct({ ...item, isNew: false }); setView('product'); }}
+                loading={loading}
+              />
+            )}
+
+            {view === 'history' && <HistoryView logs={logs} loading={loading} />}
+
+            {view === 'scan' && (
+              <RealScannerView 
+                onDetected={handleScanSuccess} 
+                onCancel={() => setView('home')} 
+              />
+            )}
+
+            {view === 'product' && currentProduct && (
+              <ProductDetailView 
+                product={currentProduct}
+                setProduct={setCurrentProduct}
+                onSave={saveProductTransaction}
+                onBack={() => setView('home')}
+                inventory={inventory}
+                logs={logs} 
+              />
+            )}
+          </main>
+
+          {(view === 'home' || view === 'history') && (
+            <nav className="fixed bottom-0 left-0 right-0 max-w-md mx-auto bg-white border-t border-slate-200 px-6 pb-4 pt-2 flex justify-between items-end text-xs text-slate-500 z-20 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
+              <button onClick={() => setView('home')} className={`flex flex-col items-center gap-1 w-16 transition-colors ${view === 'home' ? 'text-blue-600 font-bold' : 'text-slate-400'}`}>
+                <Package size={24} /> <span>Stok</span>
+              </button>
+
+              <button onClick={handleManualAdd} className="flex flex-col items-center gap-1 text-slate-400 hover:text-blue-600 w-16">
+                <PlusCircle size={24} /> <span>Tambah</span>
+              </button>
+
+              <button onClick={() => setView('scan')} className="flex flex-col items-center justify-center -mt-10 bg-blue-600 text-white w-16 h-16 rounded-full shadow-lg border-4 border-slate-100 active:scale-95 transition-transform">
+                <Scan size={28} />
+              </button>
+              
+               <button onClick={() => setView('history')} className={`flex flex-col items-center gap-1 w-16 transition-colors ${view === 'history' ? 'text-blue-600 font-bold' : 'text-slate-400'}`}>
+                <History size={24} /> <span>Riwayat</span>
+              </button>
+            </nav>
+          )}
+        </div>
+      );
+    }
+
+    /* --- COMPONENT: HOME VIEW --- */
+    function HomeView({ inventory, onSearch, scannedCode, setScannedCode, onItemClick, loading }) {
+      const items = Object.values(inventory);
+      
+      const now = new Date();
+      const currentMonth = now.getMonth() + 1;
+      const currentYear = now.getFullYear();
+      
+      const expiredCount = items.filter(i => {
+         if (!i.expiryDate || i.expiryDate === '-') return false;
+         const [m, y] = normalizeExpiry(i.expiryDate).split('/').map(Number);
+         if (!y) return false;
+         return y < currentYear || (y === currentYear && m < currentMonth);
+      }).length;
+
+      const totalStock = items.reduce((acc, curr) => acc + (parseInt(curr.stock) || 0), 0);
+
+      const handleSearch = (e) => {
+        e.preventDefault();
+        onSearch(scannedCode.trim());
+      };
+
+      return (
+        <div className="space-y-6">
+          <div className="bg-gradient-to-r from-blue-600 to-indigo-700 p-5 rounded-2xl shadow-lg text-white relative overflow-hidden">
+             <div className="absolute right-0 top-0 p-4 opacity-10">
+               <Package size={100} />
+             </div>
+             <div className="relative z-10 flex justify-between items-start">
+               <div>
+                 <p className="text-blue-100 text-xs font-bold uppercase mb-1">Total Aset</p>
+                 <p className="text-4xl font-black">{loading ? '...' : totalStock}</p>
+                 <p className="text-[10px] opacity-80 mt-1">{items.length} Jenis Produk</p>
+               </div>
+               {expiredCount > 0 && (
+                 <div className="bg-red-500/20 border border-red-400/30 rounded-lg p-2 text-right">
+                    <p className="text-red-100 text-[10px] font-bold uppercase">Kadaluarsa</p>
+                    <p className="text-xl font-bold text-red-50 flex items-center justify-end gap-1">
+                      <AlertTriangle size={16} /> {expiredCount}
+                    </p>
+                 </div>
+               )}
+            </div>
+          </div>
+
+          <form onSubmit={handleSearch} className="bg-white p-2 rounded-xl shadow-sm border border-slate-200 flex gap-2">
+            <div className="relative flex-1">
+                <Search className="absolute left-3 top-2.5 text-slate-400" size={18} />
+                <input 
+                  type="text" 
+                  placeholder="Scan atau ketik ID..." 
+                  className="w-full pl-9 pr-4 py-2 bg-transparent text-sm focus:outline-none font-bold text-slate-700"
+                  value={scannedCode}
+                  onChange={(e) => setScannedCode(e.target.value)}
+                />
+            </div>
+            <button type="submit" className="bg-slate-100 text-slate-600 px-4 py-2 rounded-lg font-bold text-xs hover:bg-slate-200">
+                Cari
+            </button>
+          </form>
+
+          <div className="pb-10">
+            <div className="flex justify-between items-center mb-3">
+               <h2 className="font-bold text-slate-700 text-sm">Daftar Barang</h2>
+            </div>
             
-            // States Loading & Error
-            const [loading, setLoading] = useState(true);
-            const [processing, setProcessing] = useState(false);
-            const [errorMsg, setErrorMsg] = useState('');
-            const [isDemoMode, setIsDemoMode] = useState(false);
+            {items.length === 0 ? (
+              <div className="text-center py-10 text-slate-400 bg-white rounded-xl border border-dashed border-slate-300">
+                <Package size={40} className="mx-auto mb-2 opacity-50" />
+                <p className="text-xs">Belum ada data barang.</p>
+              </div>
+            ) : (
+              <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden divide-y divide-slate-100">
+                {items.map((item) => {
+                  let expBadgeColor = "bg-slate-100 text-slate-500";
+                  if (item.expiryDate && item.expiryDate !== '-') {
+                     const [m, y] = normalizeExpiry(item.expiryDate).split('/').map(Number);
+                     if (y < currentYear || (y === currentYear && m < currentMonth)) {
+                        expBadgeColor = "bg-red-100 text-red-600 border-red-200"; 
+                     } else if (y === currentYear && m === currentMonth) {
+                        expBadgeColor = "bg-orange-100 text-orange-600 border-orange-200"; 
+                     } else {
+                        expBadgeColor = "bg-blue-50 text-blue-600 border-blue-100"; 
+                     }
+                  }
 
-            // --- HANDLING TOMBOL BACK HP (ANDROID) ---
-            useEffect(() => {
-                const handlePopState = (event) => {
-                    // Jika user menekan tombol back dan kita tidak di home
-                    if (view !== 'home') {
-                        // Mencegah browser keluar/mundur ke halaman sebelumnya
-                        // Kita paksa tetap di halaman ini tapi ubah state view
-                        event.preventDefault(); 
-                        setView('home');
-                    }
-                };
-
-                // Jika kita berpindah ke view selain home, tambahkan state history baru
-                // Ini membuat tombol back memiliki "sesuatu" untuk di-undo
-                if (view !== 'home') {
-                    window.history.pushState({ view: view }, document.title);
-                }
-
-                window.addEventListener('popstate', handlePopState);
-
-                return () => {
-                    window.removeEventListener('popstate', handlePopState);
-                };
-            }, [view]);
-
-
-            // --- FETCH DATA ---
-            const fetchData = async () => {
-                setLoading(true);
-                setErrorMsg('');
-                setIsDemoMode(false);
-                
-                try {
-                    const controller = new AbortController();
-                    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 detik timeout
-
-                    const response = await fetch(`${GOOGLE_SCRIPT_URL}?action=read&store=${STORE_CODE}`, {
-                        signal: controller.signal
-                    });
-                    
-                    clearTimeout(timeoutId);
-
-                    if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
-                    
-                    const data = await response.json();
-                    
-                    if (data.status === 'error') throw new Error(data.message);
-
-                    const invMap = {};
-                    if (data.inventory) {
-                        data.inventory.forEach(item => {
-                            invMap[item.id] = item;
-                        });
-                    }
-
-                    setInventory(invMap);
-                    setLogs(data.logs || []);
-                    setLoading(false);
-
-                } catch (err) {
-                    console.warn("Fetch Error, using Demo Data:", err);
-                    setInventory(DEMO_INVENTORY);
-                    setLogs(DEMO_LOGS);
-                    setIsDemoMode(true);
-                    setErrorMsg("Gagal koneksi ke Sheet. Menampilkan Data Demo (Offline Mode).");
-                    setLoading(false);
-                }
-            };
-
-            useEffect(() => {
-                fetchData();
-            }, []);
-
-            // --- ACTIONS ---
-            const handleScanSuccess = (code) => {
-                const normalizedCode = code.toUpperCase(); // Pastikan kode selalu uppercase dari Scan/Input
-                setScannedCode(normalizedCode);
-                const existingProduct = inventory[normalizedCode];
-                if (existingProduct) {
-                    setCurrentProduct({ ...existingProduct, isNew: false });
-                } else {
-                    setCurrentProduct({ id: normalizedCode, name: '', stock: 0, isNew: true });
-                }
-                setView('product');
-            };
-
-            const saveProductTransaction = async (amount, type) => {
-                if (!currentProduct) return;
-                
-                setProcessing(true);
-
-                const finalId = currentProduct.id.trim() || `MANUAL-${Date.now()}`;
-                const finalName = currentProduct.name || 'Produk Tanpa Nama';
-                const numAmount = parseInt(amount);
-                
-                const payload = {
-                    action: 'transaction',
-                    store: STORE_CODE,
-                    id: finalId,
-                    name: finalName,
-                    amount: numAmount,
-                    type: type,
-                    timestamp: new Date().toISOString()
-                };
-
-                try {
-                    // Kirim ke Google Sheet (no-cors)
-                    await fetch(GOOGLE_SCRIPT_URL, {
-                        method: 'POST',
-                        mode: 'no-cors', 
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(payload)
-                    });
-
-                    // Optimistic Update (Update Tampilan Lokal)
-                    const newInventory = { ...inventory };
-                    const currentStock = currentProduct.isNew ? 0 : (newInventory[finalId]?.stock || 0);
-                    
-                    let finalStock = currentStock;
-                    if (type === 'new') finalStock = numAmount;
-                    else if (type === 'in') finalStock += numAmount;
-                    else if (type === 'out') finalStock -= numAmount;
-
-                    newInventory[finalId] = {
-                        id: finalId,
-                        name: finalName,
-                        stock: finalStock,
-                        updatedAt: new Date().toISOString()
-                    };
-
-                    setInventory(newInventory);
-                    
-                    const newLog = {
-                        id: `local-${Date.now()}`,
-                        productId: finalId,
-                        productName: finalName,
-                        type: type,
-                        amount: numAmount,
-                        timestamp: new Date().toISOString() 
-                    };
-                    setLogs(prevLogs => [newLog, ...prevLogs]);
-
-                    setProcessing(false);
-                    setView('home');
-                    setScannedCode('');
-                    setCurrentProduct(null);
-                    
-                    if (isDemoMode) {
-                        alert("Mode Demo: Data tersimpan secara lokal saja (simulasi).");
-                    }
-
-                } catch (error) {
-                    console.error("Save Error:", error);
-                    alert("Gagal mengirim data. Cek koneksi internet.");
-                    setProcessing(false);
-                }
-            };
-
-            // --- RENDER ---
-            if (loading && !Object.keys(inventory).length && !isDemoMode) {
-                return (
-                    <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center text-slate-500 font-sans">
-                        <Loader2 className="animate-spin h-10 w-10 text-blue-600 mb-4" />
-                        <p>Menghubungkan ke Google Sheet...</p>
-                    </div>
-                );
-            }
-
-            return (
-                <div className="min-h-screen bg-slate-100 font-sans text-slate-800 max-w-md mx-auto shadow-2xl overflow-hidden relative flex flex-col">
-                    
-                    {/* HEADER */}
-                    <header className={`${isDemoMode ? 'bg-orange-600' : 'bg-blue-600'} text-white p-4 shadow-md sticky top-0 z-20 transition-colors`}>
-                        <div className="flex justify-between items-center">
-                            <div className="flex flex-col">
-                                <h1 className="text-lg font-bold flex items-center gap-2">
-                                    <Package size={20} /> Stok Pintar
-                                </h1>
-                                <span className="text-[10px] opacity-90 font-mono flex items-center gap-1 bg-black/20 px-2 py-0.5 rounded-full w-fit mt-1 border border-white/20">
-                                    <Store size={10} /> {STORE_CODE} {isDemoMode ? '(OFFLINE)' : '(G-Sheet)'}
+                  return (
+                    <div key={item.id} onClick={() => onItemClick(item)} className="p-4 flex justify-between items-center hover:bg-slate-50 active:bg-slate-100 cursor-pointer transition-colors">
+                      <div>
+                        <p className="font-bold text-slate-800 text-sm">{item.name || 'Tanpa Nama'}</p>
+                        <div className="flex flex-wrap items-center gap-2 mt-1">
+                            <span className="text-[10px] text-slate-400 font-mono bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">{item.id}</span>
+                            {item.expiryDate && item.expiryDate !== '-' && (
+                                <span className={`text-[10px] flex items-center gap-1 px-1.5 py-0.5 rounded border font-bold ${expBadgeColor}`}>
+                                    <Calendar size={8} /> {item.expiryDate}
                                 </span>
-                            </div>
-                            <div className="flex items-center gap-3">
-                                <button 
-                                    onClick={fetchData} 
-                                    disabled={loading}
-                                    className={`p-2 rounded-full hover:bg-white/20 transition-colors ${loading ? 'animate-spin' : ''}`}
-                                >
-                                    <RefreshCw size={18} />
-                                </button>
-                                {view === 'home' && (
-                                   <button onClick={() => setView('settings')} className="text-blue-100 hover:text-white p-1">
-                                     <Settings size={22} />
-                                   </button>
-                                )}
-                                {view !== 'home' && (
-                                  <button onClick={() => setView('home')} className="text-blue-100 hover:text-white">
-                                    <X size={24} />
-                                  </button>
-                                )}
-                            </div>
-                        </div>
-                    </header>
-
-                    {/* OVERLAYS */}
-                    {processing && (
-                        <div className="absolute inset-0 z-50 bg-black/50 backdrop-blur-sm flex flex-col items-center justify-center text-white">
-                            <Loader2 className="animate-spin h-12 w-12 mb-2" />
-                            <p className="font-bold">Menyimpan...</p>
-                        </div>
-                    )}
-
-                    {errorMsg && (
-                        <div className="bg-orange-50 text-orange-700 px-4 py-3 text-xs flex items-start gap-2 border-b border-orange-100">
-                            <AlertCircle size={16} className="shrink-0 mt-0.5" />
-                            <div>
-                                <p className="font-bold mb-1">Mode Demo Aktif</p>
-                                <p>{errorMsg}</p>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* MAIN CONTENT AREA */}
-                    <main className="flex-1 overflow-y-auto p-4 pb-24 bg-slate-50 scroll-smooth">
-                        
-                        {view === 'home' && (
-                            <HomeView 
-                                inventory={inventory} 
-                                onScanClick={() => setView('scan')} 
-                                onSearch={(val) => {
-                                    if(val) handleScanSuccess(val);
-                                }}
-                                scannedCode={scannedCode}
-                                setScannedCode={setScannedCode}
-                                onItemClick={(item) => {
-                                    setCurrentProduct({ ...item, isNew: false });
-                                    setView('product');
-                                }}
-                                onManualAdd={() => {
-                                   const tempId = `MANUAL-${Math.floor(Math.random() * 10000)}`;
-                                   setCurrentProduct({ id: tempId, name: '', stock: 0, isNew: true, isManualInput: true });
-                                   setView('product');
-                                }}
-                                loading={loading}
-                                isDemoMode={isDemoMode}
-                            />
-                        )}
-
-                        {view === 'settings' && (
-                            <SettingsView onCancel={() => setView('home')} storeCode={STORE_CODE} />
-                        )}
-
-                        {view === 'history' && (
-                            <HistoryView logs={logs} loading={loading} />
-                        )}
-
-                        {view === 'scan' && (
-                            <ScannerView onDetected={handleScanSuccess} onCancel={() => setView('home')} />
-                        )}
-
-                        {view === 'product' && currentProduct && (
-                            <ProductDetailView 
-                                product={currentProduct}
-                                setProduct={setCurrentProduct}
-                                onSave={saveProductTransaction}
-                                onBack={() => setView('home')}
-                            />
-                        )}
-                    </main>
-
-                    {/* BOTTOM NAV */}
-                    {(view === 'home' || view === 'history') && (
-                        <nav className="fixed bottom-0 left-0 right-0 max-w-md mx-auto bg-white border-t border-slate-200 px-6 pb-4 pt-2 flex justify-between items-end text-xs text-slate-500 z-20 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
-                            <button 
-                                onClick={() => setView('home')}
-                                className={`flex flex-col items-center gap-1 w-16 transition-colors ${view === 'home' ? 'text-blue-600 font-bold' : 'text-slate-400'}`}
-                            >
-                                <Package size={24} strokeWidth={view === 'home' ? 2.5 : 2} />
-                                <span>Stok</span>
-                            </button>
-
-                            <button 
-                                onClick={() => {
-                                   const tempId = `MANUAL-${Math.floor(Math.random() * 10000)}`;
-                                   setCurrentProduct({ id: tempId, name: '', stock: 0, isNew: true, isManualInput: true });
-                                   setView('product');
-                                }}
-                                className="flex flex-col items-center gap-1 text-slate-400 hover:text-blue-600 w-16"
-                            >
-                                <PlusCircle size={24} />
-                                <span>Tambah</span>
-                            </button>
-
-                            <button 
-                                onClick={() => setView('scan')}
-                                className="flex flex-col items-center justify-center -mt-10 bg-gradient-to-br from-blue-500 to-blue-700 text-white w-16 h-16 rounded-full shadow-lg border-4 border-slate-100 active:scale-95 transition-transform group"
-                            >
-                                <Scan size={28} />
-                            </button>
-                            
-                             <button 
-                                 onClick={() => setView('history')}
-                                 className={`flex flex-col items-center gap-1 w-16 transition-colors ${view === 'history' ? 'text-blue-600 font-bold' : 'text-slate-400'}`}
-                             >
-                                <History size={24} strokeWidth={view === 'history' ? 2.5 : 2} />
-                                <span>Riwayat</span>
-                            </button>
-                        </nav>
-                    )}
-                </div>
-            );
-        }
-
-        // --- SUB COMPONENTS ---
-
-        function HistoryView({ logs, loading }) {
-            const [filterType, setFilterType] = useState('today');
-            
-            const filteredLogs = useMemo(() => {
-                if (!logs || !logs.length) return [];
-                const parsedLogs = logs.map(log => {
-                    let dateObj;
-                    try {
-                        if (typeof log.timestamp === 'string') dateObj = new Date(log.timestamp);
-                        else if (log.timestamp?.seconds) dateObj = new Date(log.timestamp.seconds * 1000);
-                        else dateObj = new Date();
-                    } catch (e) { dateObj = new Date(); }
-                    return { ...log, dateObj };
-                });
-                parsedLogs.sort((a, b) => b.dateObj - a.dateObj);
-                const now = new Date();
-                const startOfDay = new Date(now.setHours(0,0,0,0));
-
-                return parsedLogs.filter(log => {
-                    const logDay = new Date(log.dateObj).setHours(0,0,0,0);
-                    if (filterType === 'today') return logDay === startOfDay.getTime();
-                    if (filterType === 'week') {
-                        const sevenDaysAgo = new Date();
-                        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-                        return log.dateObj >= sevenDaysAgo;
-                    }
-                    return true;
-                });
-            }, [logs, filterType]);
-
-            if (loading) return <div className="text-center py-10 text-slate-400"><Loader2 className="animate-spin mx-auto mb-2"/>Memuat riwayat...</div>;
-
-            return (
-                <div className="space-y-4 animate-in fade-in duration-300 pb-20">
-                    <div className="flex items-center justify-between mb-2">
-                        <h2 className="font-bold text-xl text-slate-800 flex items-center gap-2"><Clock className="text-blue-600" /> Riwayat</h2>
-                    </div>
-                    <div className="flex gap-2 pb-2">
-                        {['today', 'week', 'all'].map(type => (
-                            <button key={type} onClick={() => setFilterType(type)} className={`px-4 py-1.5 rounded-full text-xs font-bold capitalize transition-colors ${filterType === type ? 'bg-blue-600 text-white shadow-md' : 'bg-white text-slate-500 border border-slate-200'}`}>{type === 'today' ? 'Hari Ini' : type === 'week' ? '7 Hari' : 'Semua'}</button>
-                        ))}
-                    </div>
-                    {filteredLogs.length === 0 ? (
-                        <div className="bg-white p-8 rounded-xl border border-dashed border-slate-300 text-center text-slate-400 mt-4"><Filter size={32} className="mx-auto mb-2 opacity-30" /><p className="text-sm">Tidak ada transaksi.</p></div>
-                    ) : (
-                        <div className="space-y-2">
-                            {filteredLogs.map((log) => (
-                                <div key={log.id || Math.random()} className="bg-white p-3 rounded-xl shadow-sm border border-slate-100 flex justify-between items-center">
-                                    <div className="flex items-start gap-3">
-                                        <div className={`p-2 rounded-lg mt-1 ${log.type === 'in' || log.type === 'new' ? 'bg-green-50 text-green-600' : 'bg-red-50 text-red-600'}`}>
-                                            {log.type === 'in' || log.type === 'new' ? <ArrowDownLeft size={16}/> : <ArrowUpRight size={16}/>}
-                                        </div>
-                                        <div>
-                                            <p className="font-bold text-slate-700 text-sm leading-tight mb-1">{log.productName}</p>
-                                            <div className="flex items-center gap-2 text-xs text-slate-400"><Calendar size={10} />{log.dateObj.toLocaleString('id-ID', {day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'})}</div>
-                                        </div>
-                                    </div>
-                                    <div className={`font-bold text-lg ${log.type === 'in' || log.type === 'new' ? 'text-green-600' : 'text-red-600'}`}>{log.type === 'out' ? '-' : '+'}{log.amount}</div>
-                                </div>
-                            ))}
-                        </div>
-                    )}
-                </div>
-            );
-        }
-
-        function SettingsView({ onCancel, storeCode }) {
-            return (
-                <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-300 pb-20">
-                    <div className="bg-gradient-to-br from-green-600 to-green-800 text-white p-6 rounded-2xl shadow-lg relative overflow-hidden">
-                        <Store className="absolute -right-4 -bottom-4 opacity-20" size={120} />
-                        <div className="relative z-10">
-                            <p className="text-green-200 text-xs font-bold uppercase mb-1">Mode Tanpa Server</p>
-                            <h2 className="text-3xl font-black tracking-tight">{storeCode}</h2>
-                            <div className="mt-4 inline-flex items-center gap-2 bg-white/20 border border-white/30 px-3 py-1 rounded-full text-white text-xs font-bold"><CheckCircle size={12} /> Terhubung Google Sheet</div>
-                        </div>
-                    </div>
-                    <div className="bg-white p-5 rounded-xl shadow-sm border border-slate-200">
-                        <h2 className="font-bold text-md mb-2">Konfigurasi</h2>
-                        <div className="text-xs text-slate-600 space-y-3 bg-slate-50 p-3 rounded-lg border border-slate-200">
-                            <p>Pastikan Script Google Sheet Anda di-deploy dengan akses <b>"Anyone"</b> agar aplikasi ini bisa berjalan.</p>
-                        </div>
-                    </div>
-                    <button onClick={onCancel} className="w-full py-3 bg-slate-100 text-slate-500 rounded-xl font-bold hover:bg-slate-200">Tutup</button>
-                </div>
-            );
-        }
-
-        function HomeView({ inventory, onScanClick, onSearch, scannedCode, setScannedCode, onItemClick, onManualAdd, loading, isDemoMode }) {
-            const items = Object.values(inventory);
-            const totalItems = items.length;
-            const totalStock = items.reduce((acc, curr) => acc + (parseInt(curr.stock) || 0), 0);
-
-            return (
-                <div className="space-y-6">
-                    <div className={`relative overflow-hidden ${isDemoMode ? 'bg-gradient-to-r from-orange-500 to-red-500' : 'bg-gradient-to-r from-blue-600 to-blue-700'} p-5 rounded-2xl shadow-lg text-white transition-colors`}>
-                        <div className="flex justify-between items-start">
-                           <div><p className="text-blue-100 text-xs font-bold uppercase mb-1">Total Stok</p><p className="text-4xl font-black">{loading ? '...' : totalStock}</p></div>
-                           <div className="text-right"><p className="text-blue-100 text-xs font-bold uppercase mb-1">Produk</p><p className="text-2xl font-bold">{loading ? '...' : totalItems}</p></div>
-                        </div>
-                    </div>
-
-                    <div className="bg-white p-2 rounded-xl shadow-sm border border-slate-200 flex gap-2">
-                        <div className="relative flex-1">
-                            <Search className="absolute left-3 top-2.5 text-slate-400" size={18} />
-                            <input 
-                                type="text" 
-                                placeholder="Cari ID atau Nama..." 
-                                className="w-full pl-9 pr-4 py-2 bg-transparent text-sm focus:outline-none uppercase" 
-                                value={scannedCode} 
-                                onChange={(e) => setScannedCode(e.target.value.toUpperCase())} 
-                                onKeyDown={(e) => e.key === 'Enter' && onSearch(e.target.value)} 
-                            />
-                        </div>
-                        <button onClick={() => onSearch(scannedCode)} className="bg-slate-100 text-slate-600 px-4 py-2 rounded-lg font-bold text-xs hover:bg-slate-200">Cari</button>
-                    </div>
-
-                    <div className="pb-10">
-                        <div className="flex justify-between items-center mb-3">
-                           <h2 className="font-bold text-slate-700 text-sm">Inventaris</h2>
-                           <button onClick={onManualAdd} className="text-blue-600 text-xs font-bold flex items-center gap-1"><PlusCircle size={14}/> Baru</button>
-                        </div>
-                        {loading ? (
-                           <div className="space-y-3">{[1,2,3].map(i => <div key={i} className="h-16 bg-white rounded-xl shadow-sm animate-pulse"></div>)}</div>
-                        ) : items.length === 0 ? (
-                          <div className="text-center py-10 text-slate-400 bg-white rounded-xl border border-dashed border-slate-300"><Package size={40} className="mx-auto mb-2 opacity-50" /><p className="text-xs">Data kosong.</p></div>
-                        ) : (
-                          <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden divide-y divide-slate-100">
-                            {items.map((item) => (
-                              <div key={item.id} onClick={() => onItemClick(item)} className="p-4 flex justify-between items-center hover:bg-slate-50 active:bg-slate-100 cursor-pointer transition-colors">
-                                <div><p className="font-bold text-slate-800 text-sm">{item.name || 'Tanpa Nama'}</p><p className="text-[10px] text-slate-400 font-mono bg-slate-100 inline-block px-1 rounded mt-1">{item.id}</p></div>
-                                <div className={`px-3 py-1 rounded-full text-xs font-bold ${item.stock <= 5 ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>{item.stock} Unit</div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                    </div>
-                </div>
-            );
-        }
-
-        function ProductDetailView({ product, setProduct, onSave, onBack }) {
-            const [mode, setMode] = useState('view'); 
-            const [amount, setAmount] = useState('');
-            const [newName, setNewName] = useState(product.name);
-            const [customId, setCustomId] = useState(product.id);
-
-            const handleAction = (type) => {
-                if (!amount || parseInt(amount) <= 0) return;
-                onSave(amount, type);
-            };
-
-            return (
-                <div className="space-y-4 animate-in slide-in-from-bottom-4 duration-300 pb-20">
-                    <button onClick={onBack} className="flex items-center text-slate-500 hover:text-slate-800 mb-2 font-bold text-xs"><ArrowLeft size={16} className="mr-1" /> KEMBALI</button>
-                    <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 text-center relative overflow-hidden">
-                        <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-blue-400 to-blue-600"></div>
-                        <div className="mb-4">
-                            {product.isNew ? (
-                               <div className="space-y-2">
-                                   <input type="text" value={newName} onChange={(e) => { setNewName(e.target.value); setProduct(prev => ({...prev, name: e.target.value})); }} placeholder="Nama Produk..." className="w-full text-center text-xl font-bold border-b-2 border-blue-100 focus:border-blue-500 outline-none pb-2 placeholder:text-slate-300" autoFocus />
-                                   {product.isManualInput && (<div className="flex items-center justify-center gap-1 text-slate-400"><PenTool size={12} /><input value={customId} onChange={(e) => { setCustomId(e.target.value); setProduct(prev => ({...prev, id: e.target.value})); }} className="text-xs font-mono text-center bg-transparent outline-none w-32" /></div>)}
-                               </div>
-                            ) : (
-                                <><h2 className="text-xl font-bold text-slate-800 leading-tight">{product.name}</h2><p className="text-xs text-slate-400 font-mono mt-1">{product.id}</p></>
                             )}
                         </div>
-                        <div className="py-4"><span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Stok Tersedia</span><div className="text-5xl font-black text-slate-800 mt-1">{product.stock}</div></div>
+                      </div>
+                      <div className={`px-3 py-1 rounded-full text-xs font-bold ${item.stock <= 5 ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>
+                        {item.stock} Unit
+                      </div>
                     </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
 
-                    {mode === 'view' ? (
-                        <div className="grid grid-cols-2 gap-3">
-                            <button onClick={() => setMode('add')} className="flex items-center justify-center gap-3 p-4 bg-green-600 text-white rounded-xl shadow-lg active:scale-95 transition-transform"><PlusCircle size={24} /><div className="text-left"><p className="font-bold text-sm">Masuk</p><p className="text-[10px] opacity-80">Tambah Stok</p></div></button>
-                            <button onClick={() => setMode('remove')} className="flex items-center justify-center gap-3 p-4 bg-red-600 text-white rounded-xl shadow-lg active:scale-95 transition-transform"><Minus size={24} /><div className="text-left"><p className="font-bold text-sm">Keluar</p><p className="text-[10px] opacity-80">Kurangi Stok</p></div></button>
-                        </div>
-                    ) : (
-                        <div className="bg-white p-5 rounded-xl shadow-lg border border-slate-100 animate-in zoom-in-95 duration-200">
-                            <div className="flex justify-between items-center mb-6"><h3 className={`font-bold text-lg ${mode === 'add' ? 'text-green-600' : 'text-red-600'}`}>{mode === 'add' ? 'Barang Masuk (+)' : 'Barang Keluar (-)'}</h3><button onClick={() => setMode('view')} className="bg-slate-100 p-1 rounded-full text-slate-500"><X size={20} /></button></div>
-                            <div className="flex gap-3 items-center mb-6">
-                                <button onClick={() => setAmount(prev => Math.max(0, (parseInt(prev)||0) - 1).toString())} className="w-12 h-12 bg-slate-100 rounded-xl flex items-center justify-center font-bold text-xl text-slate-600 active:bg-slate-200">-</button>
-                                <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0" className="flex-1 text-center text-4xl font-bold py-2 outline-none text-slate-800" autoFocus />
-                                <button onClick={() => setAmount(prev => ((parseInt(prev)||0) + 1).toString())} className="w-12 h-12 bg-slate-100 rounded-xl flex items-center justify-center font-bold text-xl text-slate-600 active:bg-slate-200">+</button>
+    /* --- COMPONENT: PRODUCT DETAIL VIEW (UPDATED) --- */
+    function ProductDetailView({ product, setProduct, onSave, onBack, inventory, logs }) {
+      const [mode, setMode] = useState('view');
+      const [amount, setAmount] = useState('');
+      const [newName, setNewName] = useState(product.name);
+      
+      const [editableId, setEditableId] = useState(product.id || '');
+
+      // --- LOGIC FILTER OTOMATIS (PERBAIKAN UTAMA: NORMALISASI) ---
+      const availableExpiries = useMemo(() => {
+        const dates = new Set();
+        // 1. Ambil dari status produk saat ini (Inventory)
+        if (product.expiryDate && product.expiryDate !== '-') dates.add(normalizeExpiry(product.expiryDate));
+        
+        // 2. Ambil dari LOGS (Agar expired lama juga muncul di dropdown)
+        if (logs && logs.length > 0) {
+            logs.forEach(log => {
+                if (String(log.productId) === String(product.id) && log.expiryDate && log.expiryDate !== '-') {
+                    dates.add(normalizeExpiry(log.expiryDate));
+                }
+            });
+        }
+        
+        return Array.from(dates).sort((a, b) => {
+            const [mA, yA] = a.split('/').map(Number);
+            const [mB, yB] = b.split('/').map(Number);
+            return yB - yA || mB - mA;
+        });
+      }, [product, logs]);
+
+      // State Expired (Untuk Filter & Input Baru)
+      const defaultExp = product.expiryDate && product.expiryDate !== '-' 
+        ? normalizeExpiry(product.expiryDate).split('/') 
+        : [new Date().getMonth() + 1, new Date().getFullYear() + 1];
+        
+      const [expMonth, setExpMonth] = useState(parseInt(defaultExp[0]) || new Date().getMonth() + 1);
+      const [expYear, setExpYear] = useState(parseInt(defaultExp[1]) || new Date().getFullYear() + 1);
+      
+      const [selectedFilterExp, setSelectedFilterExp] = useState(
+          product.expiryDate && product.expiryDate !== '-' ? normalizeExpiry(product.expiryDate) : (availableExpiries[0] || '')
+      );
+
+      // --- LOGIC PERHITUNGAN STOK BATCH (FIX UTAMA: NORMALISASI) ---
+      const calculatedBatchStock = useMemo(() => {
+          if (!selectedFilterExp || selectedFilterExp === '-') return 0;
+          
+          let count = 0;
+          // Loop semua logs dengan tanggal yang SUDAH DINORMALISASI
+          logs.forEach(log => {
+             if (String(log.productId) === String(product.id)) {
+                 const logExp = normalizeExpiry(log.expiryDate);
+                 // Bandingkan tanggal yang sudah bersih
+                 if (logExp === selectedFilterExp) {
+                     const qty = parseInt(log.amount) || 0;
+                     if (log.type === 'in' || log.type === 'new') {
+                         count += qty;
+                     } else if (log.type === 'out') {
+                         count -= qty;
+                     }
+                 }
+             }
+          });
+          return count;
+      }, [selectedFilterExp, logs, product.id]);
+
+      useEffect(() => {
+        if (selectedFilterExp && selectedFilterExp !== '-') {
+            const [m, y] = selectedFilterExp.split('/').map(Number);
+            if (m && y) {
+                setExpMonth(m);
+                setExpYear(y);
+            }
+        }
+      }, [selectedFilterExp]);
+
+      const handleSubmit = () => {
+        if (!amount || parseInt(amount) <= 0) return;
+        
+        const finalId = product.isManualInput ? editableId : product.id;
+        if (!finalId.trim()) {
+            alert("ID Produk / Barcode tidak boleh kosong!");
+            return;
+        }
+
+        const type = mode === 'add' ? 'in' : 'out';
+        const formattedExpiry = `${String(expMonth).padStart(2, '0')}/${expYear}`;
+        
+        onSave(finalId, amount, type, formattedExpiry, newName);
+      };
+
+      const months = [
+        {v:1, l:'Jan'}, {v:2, l:'Feb'}, {v:3, l:'Mar'}, {v:4, l:'Apr'},
+        {v:5, l:'Mei'}, {v:6, l:'Jun'}, {v:7, l:'Jul'}, {v:8, l:'Agu'},
+        {v:9, l:'Sep'}, {v:10, l:'Okt'}, {v:11, l:'Nov'}, {v:12, l:'Des'}
+      ];
+
+      const currentSelectedExpiry = `${String(expMonth).padStart(2, '0')}/${expYear}`;
+      const isCurrentExpiryMatch = normalizeExpiry(product.expiryDate) === currentSelectedExpiry;
+
+      return (
+        <div className="space-y-4 animate-in slide-in-from-bottom-4 duration-300 pb-20">
+          <button onClick={onBack} className="flex items-center text-slate-500 hover:text-slate-800 mb-2 font-bold text-xs">
+            <ArrowLeft size={16} className="mr-1" /> KEMBALI
+          </button>
+
+          {/* DETAIL BARANG CARD */}
+          <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 text-center relative overflow-hidden">
+            <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-blue-400 to-blue-600"></div>
+            
+            <div className="mb-4">
+              {product.isNew ? (
+                 <div className="space-y-3">
+                     <input
+                        type="text"
+                        value={newName}
+                        onChange={(e) => { setNewName(e.target.value); setProduct(prev => ({...prev, name: e.target.value})); }}
+                        placeholder="Nama Produk Baru..."
+                        className="w-full text-center text-xl font-bold border-b-2 border-blue-100 focus:border-blue-500 outline-none pb-2 placeholder:text-slate-300 bg-transparent"
+                        autoFocus
+                      />
+                      {product.isManualInput ? (
+                        <div className="flex flex-col items-center">
+                            <label className="text-[10px] text-slate-400 uppercase font-bold mb-1">Barcode / ID (Wajib Isi)</label>
+                            <div className="flex items-center justify-center gap-2 border border-slate-300 rounded-lg px-3 py-2 bg-slate-50 w-full">
+                                <Edit3 size={14} className="text-slate-400" />
+                                <input 
+                                    type="text"
+                                    value={editableId}
+                                    onChange={(e) => setEditableId(e.target.value.toUpperCase())}
+                                    placeholder="Ketik ID / Scan..."
+                                    className="bg-transparent outline-none text-sm font-mono font-bold text-slate-700 text-center w-full"
+                                />
                             </div>
-                            <button onClick={() => handleAction(mode === 'add' ? 'in' : 'out')} disabled={!amount || parseInt(amount) <= 0} className={`w-full py-4 rounded-xl font-bold text-white shadow-md text-lg flex items-center justify-center gap-2 transition-colors ${mode === 'add' ? 'bg-green-600' : 'bg-red-600'}`}><Save size={20} /> KONFIRMASI</button>
                         </div>
+                      ) : (
+                        <div className="flex items-center justify-center gap-1 text-slate-400 text-xs font-mono bg-slate-100 py-1 px-3 rounded-full mx-auto w-fit">
+                           ID: {product.id}
+                        </div>
+                      )}
+                 </div>
+              ) : (
+                <>
+                    <h2 className="text-xl font-bold text-slate-800 leading-tight">{product.name}</h2>
+                    <p className="text-xs text-slate-400 font-mono mt-1">{product.id}</p>
+                    {product.expiryDate && product.expiryDate !== '-' && (
+                      <div className="mt-2 inline-flex items-center gap-1 bg-slate-100 text-slate-600 px-3 py-1 rounded-full text-xs font-bold">
+                        <Calendar size={12} /> Exp Terkini: {product.expiryDate}
+                      </div>
                     )}
-                </div>
-            );
-        }
+                </>
+              )}
+            </div>
 
-        // --- SCANNER ASLI (BUKAN SIMULASI) ---
-        function ScannerView({ onDetected, onCancel }) {
-            useEffect(() => {
-                // Inisialisasi Scanner
-                const scanner = new Html5QrcodeScanner(
-                    "reader",
-                    { 
-                        fps: 10, 
-                        qrbox: { width: 250, height: 250 },
-                        aspectRatio: 1.0
-                    },
-                    /* verbose= */ false
-                );
-                
-                scanner.render((decodedText) => {
-                    // Saat berhasil scan
-                    scanner.clear();
-                    onDetected(decodedText);
-                }, (error) => {
-                    // Saat scanning (frame by frame error) - abaikan agar console tidak penuh
-                });
-
-                // Cleanup saat komponen ditutup
-                return () => {
-                    try {
-                        scanner.clear().catch(e => console.error("Scanner clear error", e));
-                    } catch(e) { 
-                        // ignore 
-                    }
-                };
-            }, []);
-
-            return (
-                <div className="fixed inset-0 bg-black z-50 flex flex-col justify-center items-center">
-                    <div className="w-full max-w-md px-4 relative">
-                        <div className="bg-white/10 p-4 rounded-2xl backdrop-blur-sm border border-white/20">
-                             <div id="reader" className="overflow-hidden rounded-xl bg-black"></div>
-                        </div>
-                        <p className="text-white text-center mt-4 text-sm font-medium opacity-80 animate-pulse">
-                            Arahkan kamera ke Barcode Produk
-                        </p>
+            <div className="py-2 border-t border-slate-100 mt-4">
+              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Total Stok Keseluruhan</span>
+              <div className="text-5xl font-black text-slate-800 mt-1">{product.stock}</div>
+            </div>
+            
+            {/* FITUR FILTER STOK EXPIRED */}
+            {!product.isNew && (
+                <div className="mt-4 bg-slate-50 rounded-xl p-3 text-left border border-slate-200">
+                    <p className="text-[10px] font-bold text-slate-500 mb-2 flex items-center gap-1 uppercase">
+                        <Filter size={10} /> Cek Stok Per Batch (Expired)
+                    </p>
+                    
+                    {/* DROPDOWN FILTER UTAMA */}
+                    <div className="relative mb-3">
+                        {availableExpiries.length > 0 ? (
+                            <select 
+                                value={selectedFilterExp}
+                                onChange={(e) => setSelectedFilterExp(e.target.value)}
+                                className="w-full p-2 bg-white border border-slate-300 rounded-lg text-sm font-bold text-slate-700 outline-none appearance-none"
+                            >
+                                {availableExpiries.map(exp => (
+                                    <option key={exp} value={exp}>
+                                        {exp} {normalizeExpiry(product.expiryDate) === exp ? '(Terbaru)' : ''}
+                                    </option>
+                                ))}
+                            </select>
+                        ) : (
+                            <div className="w-full p-2 bg-slate-100 border border-slate-200 rounded-lg text-sm text-slate-400 italic text-center">
+                                Belum ada data expired
+                            </div>
+                        )}
+                        {availableExpiries.length > 0 && (
+                            <ChevronDown size={16} className="absolute right-3 top-2.5 text-slate-400 pointer-events-none" />
+                        )}
                     </div>
-
-                    <button 
-                        onClick={onCancel}
-                        className="absolute bottom-10 left-1/2 -translate-x-1/2 bg-white text-slate-900 px-6 py-3 rounded-full font-bold shadow-lg active:scale-95 transition-transform flex items-center gap-2"
-                    >
-                        <X size={20} /> BATAL
-                    </button>
+                    
+                    <div className="flex justify-between items-center bg-white p-2 rounded border border-slate-200 shadow-sm">
+                        <span className="text-xs text-slate-500">Sisa Stok Batch Ini:</span>
+                        <span className="font-bold text-blue-600 text-sm">
+                            {calculatedBatchStock} Unit
+                        </span>
+                    </div>
+                    <p className="text-[9px] text-slate-400 mt-1 italic leading-tight">
+                        *Dihitung berdasarkan riwayat transaksi Masuk & Keluar untuk tanggal expired tersebut.
+                    </p>
                 </div>
+            )}
+          </div>
+
+          {mode === 'view' ? (
+            <div className="grid grid-cols-2 gap-3">
+              <button 
+                onClick={() => setMode('add')}
+                className="flex items-center justify-center gap-3 p-4 bg-green-600 text-white rounded-xl shadow-lg active:scale-95 transition-transform"
+              >
+                <PlusCircle size={24} />
+                <div className="text-left">
+                    <p className="font-bold text-sm">Masuk</p>
+                    <p className="text-[10px] opacity-80">Tambah Stok</p>
+                </div>
+              </button>
+
+              <button 
+                onClick={() => setMode('remove')}
+                className="flex items-center justify-center gap-3 p-4 bg-red-600 text-white rounded-xl shadow-lg active:scale-95 transition-transform"
+              >
+                <Minus size={24} />
+                <div className="text-left">
+                    <p className="font-bold text-sm">Keluar</p>
+                    <p className="text-[10px] opacity-80">Kurang Stok</p>
+                </div>
+              </button>
+            </div>
+          ) : (
+            <div className="bg-white p-5 rounded-xl shadow-lg border border-slate-100 animate-in zoom-in-95 duration-200 mt-4 relative">
+              <button onClick={() => setMode('view')} className="absolute top-4 right-4 text-slate-300 hover:text-slate-500">
+                <X size={24} />
+              </button>
+              
+              <h3 className={`font-bold text-lg mb-6 flex items-center gap-2 ${mode === 'add' ? 'text-green-600' : 'text-red-600'}`}>
+                 {mode === 'add' ? <PlusCircle /> : <Minus />} 
+                 {mode === 'add' ? 'Barang Masuk' : 'Barang Keluar'}
+              </h3>
+
+              <div className="flex gap-3 items-center mb-6">
+                <button 
+                  onClick={() => setAmount(prev => Math.max(0, (parseInt(prev)||0) - 1).toString())}
+                  className="w-12 h-12 bg-slate-100 rounded-xl flex items-center justify-center font-bold text-xl text-slate-600 active:bg-slate-200"
+                >-</button>
+                <input 
+                  type="number" 
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value)}
+                  placeholder="0"
+                  className="flex-1 text-center text-4xl font-bold py-2 outline-none text-slate-800 border-b border-slate-100 focus:border-blue-500 transition-colors"
+                  autoFocus
+                />
+                <button 
+                  onClick={() => setAmount(prev => ((parseInt(prev)||0) + 1).toString())}
+                  className="w-12 h-12 bg-slate-100 rounded-xl flex items-center justify-center font-bold text-xl text-slate-600 active:bg-slate-200"
+                >+</button>
+              </div>
+
+              {/* INPUT EXPIRED DATE (MANUAL YEAR - TETAP ADA UNTUK INPUT DATA BARU) */}
+              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 mb-6">
+                 <p className="text-xs font-bold text-slate-500 mb-2 flex items-center gap-1">
+                   <Calendar size={14}/> Set Tanggal Kadaluarsa
+                 </p>
+                 <div className="flex gap-2">
+                    <select 
+                      value={expMonth} 
+                      onChange={(e) => setExpMonth(e.target.value)}
+                      className="flex-1 p-2 bg-white border border-slate-200 rounded-lg text-sm font-bold text-slate-700 outline-none focus:border-blue-500 appearance-none text-center"
+                    >
+                      {months.map(m => <option key={m.v} value={m.v}>{m.l} ({m.v})</option>)}
+                    </select>
+                    
+                    {/* INPUT TAHUN MANUAL */}
+                    <input 
+                      type="number"
+                      value={expYear}
+                      onChange={(e) => setExpYear(e.target.value)}
+                      placeholder="Tahun (YYYY)"
+                      className="flex-1 p-2 bg-white border border-slate-200 rounded-lg text-sm font-bold text-slate-700 outline-none focus:border-blue-500 text-center"
+                    />
+                 </div>
+                 <p className="text-[10px] text-slate-400 mt-2 text-center">
+                    {mode === 'add' ? 'Set Expired batch baru ini' : 'Update Expired batch yang dikeluarkan'}
+                 </p>
+              </div>
+
+              <button 
+                onClick={handleSubmit}
+                disabled={!amount || parseInt(amount) <= 0}
+                className={`w-full py-4 rounded-xl font-bold text-white shadow-md text-lg flex items-center justify-center gap-2 transition-colors ${
+                  mode === 'add' 
+                    ? 'bg-green-600 hover:bg-green-700 disabled:bg-slate-300' 
+                    : 'bg-red-600 hover:bg-red-700 disabled:bg-slate-300'
+                }`}
+              >
+                <Save size={20} /> KONFIRMASI
+              </button>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function HistoryView({ logs, loading }) {
+       const displayLogs = logs.slice(0, 30);
+       if (loading) return <div className="p-10 text-center"><Loader2 className="animate-spin mx-auto"/></div>;
+
+       return (
+         <div className="space-y-4 pb-20">
+            <h2 className="font-bold text-xl text-slate-800 flex items-center gap-2 px-2">
+              <Clock className="text-blue-600" /> Riwayat Transaksi
+            </h2>
+            {displayLogs.length === 0 ? (
+               <div className="text-center text-slate-400 py-10">Belum ada riwayat.</div>
+            ) : (
+               <div className="space-y-3">
+                 {displayLogs.map((log, idx) => (
+                    <div key={idx} className="bg-white p-4 rounded-xl shadow-sm border border-slate-100 flex justify-between items-center">
+                       <div className="flex items-center gap-3">
+                          <div className={`p-2 rounded-lg ${log.type === 'out' ? 'bg-red-50 text-red-600' : 'bg-green-50 text-green-600'}`}>
+                             {log.type === 'out' ? <ArrowUpRight size={18}/> : <ArrowDownLeft size={18}/>}
+                          </div>
+                          <div>
+                             <p className="font-bold text-slate-700 text-sm">{log.productName}</p>
+                             <div className="flex gap-2 text-[10px] text-slate-400 mt-0.5">
+                                <span>{new Date(log.timestamp).toLocaleString('id-ID')}</span>
+                                {log.expiryDate && <span>| Exp: {log.expiryDate}</span>}
+                             </div>
+                          </div>
+                       </div>
+                       <div className={`font-black text-lg ${log.type === 'out' ? 'text-red-600' : 'text-green-600'}`}>
+                          {log.type === 'out' ? '-' : '+'}{log.amount}
+                       </div>
+                    </div>
+                 ))}
+               </div>
+            )}
+         </div>
+       );
+    }
+
+    /* --- SCANNER ASLI (REAL TIME) --- */
+    function RealScannerView({ onDetected, onCancel }) {
+      useEffect(() => {
+        // Inisialisasi Scanner
+        const scannerId = "reader";
+        let html5QrcodeScanner;
+
+        // Beri sedikit delay agar DOM reader siap
+        const timer = setTimeout(() => {
+            html5QrcodeScanner = new Html5QrcodeScanner(
+                scannerId, 
+                { fps: 10, qrbox: { width: 250, height: 250 } },
+                /* verbose= */ false
             );
-        }
+            
+            html5QrcodeScanner.render(
+                (decodedText) => {
+                    // Success callback
+                    html5QrcodeScanner.clear();
+                    onDetected(decodedText);
+                }, 
+                (errorMessage) => {
+                    // Error callback (scan in progress)
+                    // console.log(errorMessage); 
+                }
+            );
+        }, 100);
 
-        // --- RENDER APP ---
-        const root = ReactDOM.createRoot(document.getElementById('root'));
-        root.render(<App />);
+        return () => {
+            clearTimeout(timer);
+            if(html5QrcodeScanner) {
+                html5QrcodeScanner.clear().catch(error => console.error("Failed to clear scanner", error));
+            }
+        };
+      }, []);
 
-    </script>
+      return (
+        <div className="fixed inset-0 bg-black z-50 flex flex-col">
+          <div className="relative flex-1 flex flex-col items-center justify-center p-4">
+            
+            <div className="bg-white p-1 rounded-2xl w-full max-w-sm overflow-hidden relative">
+                <div id="reader" className="w-full h-full bg-slate-900 rounded-xl overflow-hidden min-h-[300px]"></div>
+                
+                {/* Overlay garis merah scanning */}
+                <div className="absolute top-1/2 left-4 right-4 h-0.5 bg-red-500 shadow-[0_0_10px_red] animate-pulse pointer-events-none z-10"></div>
+            </div>
+
+            <p className="text-white text-sm mt-6 font-medium text-center">
+                Arahkan kamera ke Barcode / QR Code
+            </p>
+            <p className="text-slate-400 text-xs mt-1 text-center">
+                Pastikan cahaya cukup terang
+            </p>
+
+            <button onClick={onCancel} className="mt-8 bg-slate-800 text-white px-6 py-3 rounded-full font-bold flex items-center gap-2 hover:bg-slate-700 border border-slate-700">
+                <X size={18} /> Batalkan
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
 </body>
 </html>
